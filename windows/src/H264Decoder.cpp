@@ -4,6 +4,8 @@
 #include <mferror.h>
 #include <mfidl.h>
 #include <algorithm>
+#include <cstring>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 
