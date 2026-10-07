@@ -1,3 +1,5 @@
+#include "FrameClient.h"
+
 #include <windows.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -9,7 +11,9 @@
 #include <wrl/implements.h>
 
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <vector>
 
 using Microsoft::WRL::ClassicCom;
 using Microsoft::WRL::ComPtr;
@@ -22,8 +26,8 @@ namespace {
 const CLSID CLSID_PhoneCamSource =
 {0xb6e2a98d, 0x6f02, 0x4c98, {0x86, 0xf8, 0x5a, 0xe3, 0x0a, 0x2d, 0x17, 0xc2}};
 
-constexpr UINT32 kWidth = 640;
-constexpr UINT32 kHeight = 480;
+constexpr UINT32 kWidth = 1920;
+constexpr UINT32 kHeight = 1080;
 constexpr UINT32 kFps = 15;
 constexpr DWORD kStreamId = 0;
 constexpr LONGLONG kFrameDuration = 10'000'000LL / kFps;
@@ -60,6 +64,7 @@ private:
     ComPtr<IMFMediaEventQueue> events_;
     ComPtr<IMFStreamDescriptor> descriptor_;
     ComPtr<IMFAttributes> attributes_;
+    FrameClient frameClient_;
     MF_STREAM_STATE state_ = MF_STREAM_STATE_STOPPED;
     bool shutdown_ = false;
     LONGLONG timestamp_ = 0;
@@ -137,7 +142,11 @@ HRESULT CameraStream::Initialize(CameraSource* source) {
     ComPtr<IMFMediaTypeHandler> handler;
     hr = descriptor_->GetMediaTypeHandler(&handler);
     if (FAILED(hr)) return hr;
-    return handler->SetCurrentMediaType(mediaType.Get());
+    hr = handler->SetCurrentMediaType(mediaType.Get());
+    if (FAILED(hr)) return hr;
+
+    frameClient_.Start(8765);
+    return S_OK;
 }
 
 HRESULT CameraStream::BeginGetEvent(IMFAsyncCallback* callback, IUnknown* state) {
@@ -200,18 +209,25 @@ HRESULT CameraStream::MakeFrame(IMFSample** sample) {
     hr = buffer->Lock(&bytes, &capacity, nullptr);
     if (FAILED(hr)) return hr;
 
-    const UINT32 phase = static_cast<UINT32>((frame_ * 4) % 256);
-    BYTE* yPlane = bytes;
-    BYTE* uvPlane = bytes + kWidth * kHeight;
-    for (UINT32 y = 0; y < kHeight; ++y) {
-        for (UINT32 x = 0; x < kWidth; ++x) {
-            yPlane[y * kWidth + x] = static_cast<BYTE>(32 + ((x + phase + y / 2) % 192));
+    std::vector<std::uint8_t> latest;
+    if (frameClient_.Latest(latest) && latest.size() == kFrameBytes) {
+        memcpy(bytes, latest.data(), kFrameBytes);
+    } else {
+        // Fallback pattern keeps the camera usable before PhoneCam.exe connects.
+        const UINT32 phase = static_cast<UINT32>((frame_ * 4) % 256);
+        BYTE* yPlane = bytes;
+        BYTE* uvPlane = bytes + kWidth * kHeight;
+        for (UINT32 y = 0; y < kHeight; ++y) {
+            for (UINT32 x = 0; x < kWidth; ++x) {
+                yPlane[y * kWidth + x] = static_cast<BYTE>(32 + ((x + phase + y / 2) % 192));
+            }
+        }
+        for (UINT32 i = 0; i < kWidth * kHeight / 2; i += 2) {
+            uvPlane[i] = static_cast<BYTE>(96 + ((frame_ / 3) % 64));
+            uvPlane[i + 1] = static_cast<BYTE>(160 - ((frame_ / 4) % 64));
         }
     }
-    for (UINT32 i = 0; i < kWidth * kHeight / 2; i += 2) {
-        uvPlane[i] = static_cast<BYTE>(96 + ((frame_ / 3) % 64));
-        uvPlane[i + 1] = static_cast<BYTE>(160 - ((frame_ / 4) % 64));
-    }
+
     buffer->Unlock();
     buffer->SetCurrentLength(kFrameBytes);
 
@@ -282,6 +298,7 @@ HRESULT CameraStream::GetStreamState(MF_STREAM_STATE* state) {
 }
 
 HRESULT CameraStream::ShutdownInternal() {
+    frameClient_.Stop();
     std::scoped_lock lock(mutex_);
     if (shutdown_) return S_OK;
     shutdown_ = true;
