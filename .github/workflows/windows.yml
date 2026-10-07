@@ -20,7 +20,9 @@ jobs:
         run: cmake -S windows -B build/windows -A x64
       - name: Build
         run: cmake --build build/windows --config Release --parallel
-      - uses: actions/upload-artifact@v4
+      - name: Upload Windows build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: phonecam-windows-x64
           path: build/windows/Release/PhoneCam.exe
