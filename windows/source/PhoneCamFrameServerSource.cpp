@@ -36,7 +36,7 @@ const CLSID CLSID_PhoneCamSource =
 constexpr DWORD kStreamId = 0;
 constexpr UINT32 kWidth = 1920;
 constexpr UINT32 kHeight = 1080;
-constexpr UINT32 kFps = 15;
+constexpr UINT32 kFps = 30;
 constexpr DWORD kFrameBytes = kWidth * kHeight * 3 / 2;
 constexpr LONGLONG kFrameDuration = 10'000'000LL / kFps;
 
