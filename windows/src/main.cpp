@@ -21,9 +21,22 @@ H264Decoder gDecoder;
 FrameBridge gBridge;
 VirtualCamera gCamera;
 HWND gStatus = nullptr;
+HRESULT gCameraStartHr = S_OK;
+std::wstring gCameraStartStage;
 
 void setStatus(const std::wstring& text) {
     if (gStatus) SetWindowTextW(gStatus, text.c_str());
+}
+
+void showCameraStartError() {
+    wchar_t text[512]{};
+    wsprintfW(
+        text,
+        L"Virtual camera failed at %s: 0x%08X. H.264 receiver is working.",
+        gCameraStartStage.empty() ? L"unknown stage" : gCameraStartStage.c_str(),
+        static_cast<unsigned>(gCameraStartHr)
+    );
+    setStatus(text);
 }
 
 bool splitAddress(const std::wstring& value, std::wstring& host, std::uint16_t& port) {
@@ -55,7 +68,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
         gStatus = CreateWindowW(L"STATIC", L"Disconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 372, 58, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+            16, 88, 392, 72, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -71,6 +84,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             gReceiver.Stop();
             gDecoder.Reset();
+            gCameraStartHr = S_OK;
+            gCameraStartStage.clear();
+
             if (!gBridge.Start()) {
                 setStatus(L"Cannot start local virtual-camera bridge on 127.0.0.1:8765.");
                 return 0;
@@ -87,7 +103,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
 
-            setStatus(L"Connecting to phone H.264 stream...");
+            hr = gCamera.Start();
+            if (FAILED(hr)) {
+                gCameraStartHr = hr;
+                gCameraStartStage = gCamera.LastStage();
+                showCameraStartError();
+            } else {
+                setStatus(L"Virtual camera started. Connecting to phone H.264 stream...");
+            }
+
             gReceiver.Start(host, port, [hwnd](std::vector<std::uint8_t> packet) {
                 const HRESULT decodeHr = gDecoder.Push(packet);
                 if (FAILED(decodeHr) && decodeHr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -96,18 +120,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     PostMessageW(hwnd, WM_CONNECTION_STATUS, 1, 0);
                 }
             });
-
-            hr = gCamera.Start();
-            if (FAILED(hr)) {
-                wchar_t text[256]{};
-                wsprintfW(text, L"Receiver started, but virtual camera registration failed (0x%08X). Reinstall the latest setup.", static_cast<unsigned>(hr));
-                setStatus(text);
-            }
             return 0;
         }
         break;
     case WM_CONNECTION_STATUS:
-        if (wParam == 2 && gCamera.IsStarted()) {
+        if (FAILED(gCameraStartHr)) {
+            showCameraStartError();
+        } else if (wParam == 2 && gCamera.IsStarted()) {
             setStatus(L"Connected. H.264 decoded and PhoneCam virtual camera is receiving frames.");
         } else if (gCamera.IsStarted()) {
             setStatus(L"Connected to phone. Waiting for first decoded video frame...");
@@ -116,6 +135,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     case WM_DECODE_ERROR: {
+        if (FAILED(gCameraStartHr)) {
+            showCameraStartError();
+            return 0;
+        }
         wchar_t text[256]{};
         wsprintfW(text, L"H.264 decode error: 0x%08X. Phone must stream 1920x1080 @ 15 FPS for this MVP.", static_cast<unsigned>(wParam));
         setStatus(text);
@@ -150,7 +173,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 420, 200,
+        CW_USEDEFAULT, CW_USEDEFAULT, 440, 220,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
