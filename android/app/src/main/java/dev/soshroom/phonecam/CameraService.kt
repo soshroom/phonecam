@@ -79,7 +79,6 @@ class CameraService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneCam::stream").apply { acquire() }
 
         h264Server = H264Server(cfg.streamPort) {
-            // A freshly connected decoder should not have to wait up to the normal I-frame interval.
             runCatching {
                 encoder?.setParameters(Bundle().apply {
                     putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
@@ -226,6 +225,13 @@ class CameraService : Service() {
         })
     }
 
+    private fun updateCodecConfig(config: List<ByteArray>) {
+        val nonEmpty = config.filter { it.isNotEmpty() }
+        if (nonEmpty.isEmpty()) return
+        codecConfig = nonEmpty.map { it.copyOf() }
+        h264Server?.setCodecConfig(codecConfig)
+    }
+
     private fun drainEncoder() {
         val info = MediaCodec.BufferInfo()
         while (draining.get()) {
@@ -242,8 +248,7 @@ class CameraService : Service() {
                                 if (bytes.isNotEmpty()) config += bytes
                             }
                         }
-                        codecConfig = config
-                        h264Server?.setCodecConfig(config)
+                        updateCodecConfig(config)
                         config.forEach { h264Server?.broadcast(it) }
                     }
                     else -> if (index >= 0) {
@@ -252,10 +257,20 @@ class CameraService : Service() {
                             buffer.limit(info.offset + info.size)
                             val bytes = ByteArray(info.size)
                             buffer.get(bytes)
-                            if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-                                codecConfig.forEach { h264Server?.broadcast(it) }
+
+                            val isCodecConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                            if (isCodecConfig && bytes.isNotEmpty()) {
+                                // Some hardware AVC encoders expose SPS/PPS only through a
+                                // BUFFER_FLAG_CODEC_CONFIG output buffer rather than csd-0/csd-1.
+                                // Cache it so clients connecting after encoder startup receive it.
+                                updateCodecConfig(listOf(bytes))
+                                h264Server?.broadcast(bytes)
+                            } else {
+                                if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                                    codecConfig.forEach { h264Server?.broadcast(it) }
+                                }
+                                if (bytes.isNotEmpty()) h264Server?.broadcast(bytes)
                             }
-                            if (bytes.isNotEmpty()) h264Server?.broadcast(bytes)
                         }
                         codec.releaseOutputBuffer(index, false)
                     }
