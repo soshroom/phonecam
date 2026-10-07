@@ -26,9 +26,11 @@ target_link_libraries(PhoneCam PRIVATE
 
 add_library(PhoneCamSource SHARED
     source/PhoneCamMediaSource.cpp
+    source/FrameClient.cpp
     source/PhoneCamSource.def
 )
 
+target_include_directories(PhoneCamSource PRIVATE source)
 target_compile_definitions(PhoneCamSource PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PhoneCamSource PRIVATE
     ws2_32
