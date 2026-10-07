@@ -2,6 +2,7 @@ name: Windows
 
 on:
   push:
+    branches: [main]
     paths:
       - 'windows/**'
       - '.github/workflows/windows.yml'
@@ -10,6 +11,9 @@ on:
       - 'windows/**'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,11 +27,17 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" windows\installer\PhoneCam.iss'
-      - name: Upload Windows build
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: phonecam-windows-x64
-          path: |
-            build/windows/Release/PhoneCam.exe
-            windows/installer/output/PhoneCamSetup.exe
+      - name: Publish Windows build to release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.sha }}
+        run: |
+          Copy-Item build/windows/Release/PhoneCam.exe PhoneCam-windows-x64.exe
+          Copy-Item windows/installer/output/PhoneCamSetup.exe PhoneCamSetup-x64.exe
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --target "${{ github.sha }}" --title "PhoneCam build ${{ github.run_number }}" --notes "Automated build from commit ${{ github.sha }}"
+          }
+          gh release upload $env:TAG PhoneCam-windows-x64.exe PhoneCamSetup-x64.exe --clobber
