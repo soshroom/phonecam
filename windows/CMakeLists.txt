@@ -8,6 +8,8 @@ add_definitions(-DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN)
 add_executable(PhoneCam WIN32
     src/main.cpp
     src/NetworkReceiver.cpp
+    src/H264Decoder.cpp
+    src/FrameBridge.cpp
     src/VirtualCamera.cpp
 )
 
@@ -29,6 +31,7 @@ add_library(PhoneCamSource SHARED
 
 target_compile_definitions(PhoneCamSource PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PhoneCamSource PRIVATE
+    ws2_32
     mfplat
     mf
     mfuuid
