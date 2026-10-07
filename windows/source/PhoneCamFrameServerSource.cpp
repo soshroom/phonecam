@@ -20,8 +20,10 @@
 
 #include "FrameClient.h"
 
+using Microsoft::WRL::ChainInterfaces;
 using Microsoft::WRL::ClassicCom;
 using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::FtmBase;
 using Microsoft::WRL::Make;
 using Microsoft::WRL::RuntimeClass;
 using Microsoft::WRL::RuntimeClassFlags;
@@ -40,7 +42,10 @@ constexpr LONGLONG kFrameDuration = 10'000'000LL / kFps;
 
 class CameraSource;
 
-class CameraStream final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IMFMediaStream2> {
+class CameraStream final : public RuntimeClass<
+    RuntimeClassFlags<ClassicCom>,
+    ChainInterfaces<IMFMediaStream2, IMFMediaStream, IMFMediaEventGenerator>,
+    FtmBase> {
 public:
     HRESULT Initialize(CameraSource* source, FrameClient* frames);
     HRESULT Start(const PROPVARIANT* position);
@@ -75,10 +80,11 @@ private:
 
 class CameraSource final : public RuntimeClass<
     RuntimeClassFlags<ClassicCom>,
-    IMFMediaSourceEx,
+    ChainInterfaces<IMFMediaSourceEx, IMFMediaSource, IMFMediaEventGenerator>,
     IMFGetService,
     IKsControl,
-    IMFSampleAllocatorControl> {
+    IMFSampleAllocatorControl,
+    FtmBase> {
 public:
     HRESULT Initialize(IMFAttributes* activationAttributes);
 
@@ -480,7 +486,7 @@ HRESULT CameraSource::GetStreamAttributes(DWORD streamId, IMFAttributes** attrib
     return S_OK;
 }
 
-class CameraActivate final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IMFActivate> {
+class CameraActivate final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IMFActivate, FtmBase> {
 public:
     HRESULT Initialize() { return MFCreateAttributes(&attributes_, 16); }
 
