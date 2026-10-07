@@ -1,6 +1,9 @@
 #include <windows.h>
 #include <mfapi.h>
 #include <mferror.h>
+#include <atomic>
+#include <cstdint>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,6 +27,28 @@ HWND gStatus = nullptr;
 HRESULT gCameraStartHr = S_OK;
 std::wstring gCameraStartStage;
 
+struct StreamStats {
+    std::atomic<std::uint64_t> packets{0};
+    std::atomic<std::uint64_t> bytes{0};
+    std::atomic<std::uint64_t> sps{0};
+    std::atomic<std::uint64_t> pps{0};
+    std::atomic<std::uint64_t> idr{0};
+    std::atomic<std::uint64_t> vcl{0};
+    std::atomic<std::uint64_t> decoded{0};
+    std::atomic<int> lastNal{-1};
+
+    void Reset() {
+        packets = 0;
+        bytes = 0;
+        sps = 0;
+        pps = 0;
+        idr = 0;
+        vcl = 0;
+        decoded = 0;
+        lastNal = -1;
+    }
+} gStats;
+
 void setStatus(const std::wstring& text) {
     if (gStatus) SetWindowTextW(gStatus, text.c_str());
 }
@@ -37,6 +62,85 @@ void showCameraStartError() {
         static_cast<unsigned>(gCameraStartHr)
     );
     setStatus(text);
+}
+
+std::size_t startCodeLength(const std::vector<std::uint8_t>& data, std::size_t pos) {
+    if (pos + 4 <= data.size() && data[pos] == 0 && data[pos + 1] == 0 && data[pos + 2] == 0 && data[pos + 3] == 1) {
+        return 4;
+    }
+    if (pos + 3 <= data.size() && data[pos] == 0 && data[pos + 1] == 0 && data[pos + 2] == 1) {
+        return 3;
+    }
+    return 0;
+}
+
+void countNalType(int type) {
+    gStats.lastNal = type;
+    if (type == 7) ++gStats.sps;
+    if (type == 8) ++gStats.pps;
+    if (type == 5) ++gStats.idr;
+    if (type >= 1 && type <= 5) ++gStats.vcl;
+}
+
+void inspectPacket(const std::vector<std::uint8_t>& packet) {
+    ++gStats.packets;
+    gStats.bytes += packet.size();
+    if (packet.empty()) return;
+
+    bool sawAnnexB = false;
+    for (std::size_t pos = 0; pos < packet.size();) {
+        const auto code = startCodeLength(packet, pos);
+        if (!code) {
+            ++pos;
+            continue;
+        }
+        sawAnnexB = true;
+        const auto payload = pos + code;
+        if (payload < packet.size()) countNalType(packet[payload] & 0x1f);
+        pos = payload + 1;
+    }
+    if (sawAnnexB) return;
+
+    // Also recognize AVC length-prefixed access units.
+    std::size_t pos = 0;
+    bool parsedAvcc = false;
+    while (pos + 4 <= packet.size()) {
+        const std::uint32_t length =
+            (static_cast<std::uint32_t>(packet[pos]) << 24) |
+            (static_cast<std::uint32_t>(packet[pos + 1]) << 16) |
+            (static_cast<std::uint32_t>(packet[pos + 2]) << 8) |
+            static_cast<std::uint32_t>(packet[pos + 3]);
+        pos += 4;
+        if (length == 0 || pos + length > packet.size()) {
+            parsedAvcc = false;
+            break;
+        }
+        parsedAvcc = true;
+        countNalType(packet[pos] & 0x1f);
+        pos += length;
+    }
+    if (parsedAvcc && pos == packet.size()) return;
+
+    // Last-resort diagnostic for a raw single NAL packet.
+    countNalType(packet[0] & 0x1f);
+}
+
+std::wstring streamStatusText(bool decodedNow) {
+    std::wostringstream out;
+    if (decodedNow || gStats.decoded.load() > 0) {
+        out << L"Connected. H.264 decoded; virtual camera is receiving frames.";
+    } else {
+        out << L"Connected to phone. Waiting for first decoded video frame...";
+    }
+    out << L"\r\nPackets: " << gStats.packets.load()
+        << L", bytes: " << gStats.bytes.load();
+    out << L"\r\nNAL: SPS=" << gStats.sps.load()
+        << L" PPS=" << gStats.pps.load()
+        << L" IDR=" << gStats.idr.load()
+        << L" VCL=" << gStats.vcl.load()
+        << L" last=" << gStats.lastNal.load();
+    out << L"\r\nDecoded NV12 frames: " << gStats.decoded.load();
+    return out.str();
 }
 
 bool splitAddress(const std::wstring& value, std::wstring& host, std::uint16_t& port) {
@@ -68,7 +172,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
         gStatus = CreateWindowW(L"STATIC", L"Disconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 392, 72, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+            16, 88, 410, 130, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -84,6 +188,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             gReceiver.Stop();
             gDecoder.Reset();
+            gStats.Reset();
             gCameraStartHr = S_OK;
             gCameraStartStage.clear();
 
@@ -93,6 +198,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             HRESULT hr = gDecoder.Initialize(1920, 1080, 15, [hwnd](std::vector<std::uint8_t> frame) {
+                ++gStats.decoded;
                 gBridge.Publish(frame);
                 PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
             });
@@ -113,6 +219,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             gReceiver.Start(host, port, [hwnd](std::vector<std::uint8_t> packet) {
+                inspectPacket(packet);
                 const HRESULT decodeHr = gDecoder.Push(packet);
                 if (FAILED(decodeHr) && decodeHr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
                     PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(decodeHr), 0);
@@ -126,10 +233,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CONNECTION_STATUS:
         if (FAILED(gCameraStartHr)) {
             showCameraStartError();
-        } else if (wParam == 2 && gCamera.IsStarted()) {
-            setStatus(L"Connected. H.264 decoded and PhoneCam virtual camera is receiving frames.");
         } else if (gCamera.IsStarted()) {
-            setStatus(L"Connected to phone. Waiting for first decoded video frame...");
+            setStatus(streamStatusText(wParam == 2));
         } else {
             setStatus(L"Receiving H.264, but virtual camera is not active.");
         }
@@ -139,9 +244,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             showCameraStartError();
             return 0;
         }
-        wchar_t text[256]{};
-        wsprintfW(text, L"H.264 decode error: 0x%08X. Phone must stream 1920x1080 @ 15 FPS for this MVP.", static_cast<unsigned>(wParam));
-        setStatus(text);
+        std::wostringstream out;
+        out << L"H.264 decode error: 0x" << std::hex << static_cast<unsigned>(wParam) << std::dec;
+        out << L"\r\nPackets: " << gStats.packets.load();
+        out << L" SPS=" << gStats.sps.load()
+            << L" PPS=" << gStats.pps.load()
+            << L" IDR=" << gStats.idr.load()
+            << L" VCL=" << gStats.vcl.load()
+            << L" last=" << gStats.lastNal.load();
+        out << L"\r\nDecoded NV12 frames: " << gStats.decoded.load();
+        setStatus(out.str());
         return 0;
     }
     case WM_DESTROY:
@@ -173,7 +285,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 440, 220,
+        CW_USEDEFAULT, CW_USEDEFAULT, 460, 290,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
