@@ -24,6 +24,7 @@ target_link_libraries(PhoneCam PRIVATE
 
 add_library(PhoneCamSource SHARED
     source/PhoneCamSource.cpp
+    source/PhoneCamSource.def
 )
 
 target_compile_definitions(PhoneCamSource PRIVATE _CRT_SECURE_NO_WARNINGS)
