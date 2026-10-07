@@ -172,7 +172,7 @@ let initialized=false;
 async function refresh(){
  try{
   const r=await fetch('/api/status',{cache:'no-store'}); const s=await r.json();
-  status.textContent=`${s.width}x${s.height} @ ${s.fps} FPS\n${(s.bitrate/1000000).toFixed(1)} Mbps, zoom ${s.zoom}x\nWindows clients: ${s.clients}\nUptime: ${s.uptimeSeconds}s\nBattery: ${s.batteryPercent}%\nBattery temp: ${s.batteryTemperatureC} C`;
+  status.textContent=s.width+'x'+s.height+' @ '+s.fps+' FPS\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
  }catch(e){status.textContent='offline';}
  preview.src='/preview.jpg?t='+Date.now();
