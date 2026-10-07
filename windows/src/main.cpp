@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <mfapi.h>
+#include <mferror.h>
 #include <string>
 #include <vector>
 
