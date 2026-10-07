@@ -1,0 +1,26 @@
+name: Windows
+
+on:
+  push:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S windows -B build/windows -A x64
+      - name: Build
+        run: cmake --build build/windows --config Release --parallel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phonecam-windows-x64
+          path: build/windows/Release/PhoneCam.exe
