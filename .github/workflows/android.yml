@@ -2,6 +2,7 @@ name: Android
 
 on:
   push:
+    branches: [main]
     paths:
       - 'android/**'
       - '.github/workflows/android.yml'
@@ -10,6 +11,9 @@ on:
       - 'android/**'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -28,9 +32,14 @@ jobs:
           gradle-version: '8.10.2'
       - name: Build APK
         run: gradle :app:assembleDebug --stacktrace
-      - name: Upload APK
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: phonecam-android-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish APK to release
+        if: github.event_name != 'pull_request'
+        working-directory: .
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.sha }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk PhoneCam-android-debug.apk
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "${{ github.sha }}" --title "PhoneCam build ${{ github.run_number }}" --notes "Automated build from commit ${{ github.sha }}"
+          gh release upload "$TAG" PhoneCam-android-debug.apk --clobber
