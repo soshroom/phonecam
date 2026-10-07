@@ -35,6 +35,7 @@ struct StreamStats {
     std::atomic<std::uint64_t> idr{0};
     std::atomic<std::uint64_t> vcl{0};
     std::atomic<std::uint64_t> decoded{0};
+    std::atomic<std::uint64_t> avccConfig{0};
     std::atomic<int> lastNal{-1};
 
     void Reset() {
@@ -45,6 +46,7 @@ struct StreamStats {
         idr = 0;
         vcl = 0;
         decoded = 0;
+        avccConfig = 0;
         lastNal = -1;
     }
 } gStats;
@@ -82,6 +84,42 @@ void countNalType(int type) {
     if (type >= 1 && type <= 5) ++gStats.vcl;
 }
 
+bool inspectAvcDecoderConfig(const std::vector<std::uint8_t>& packet) {
+    if (packet.size() < 7 || packet[0] != 1) return false;
+
+    std::size_t pos = 5;
+    const std::uint8_t spsCount = packet[pos++] & 0x1f;
+    if (spsCount == 0) return false;
+
+    for (std::uint8_t i = 0; i < spsCount; ++i) {
+        if (pos + 2 > packet.size()) return false;
+        const std::size_t length =
+            (static_cast<std::size_t>(packet[pos]) << 8) |
+            static_cast<std::size_t>(packet[pos + 1]);
+        pos += 2;
+        if (length == 0 || pos + length > packet.size()) return false;
+        countNalType(packet[pos] & 0x1f);
+        pos += length;
+    }
+
+    if (pos >= packet.size()) return false;
+    const std::uint8_t ppsCount = packet[pos++];
+    if (ppsCount == 0) return false;
+    for (std::uint8_t i = 0; i < ppsCount; ++i) {
+        if (pos + 2 > packet.size()) return false;
+        const std::size_t length =
+            (static_cast<std::size_t>(packet[pos]) << 8) |
+            static_cast<std::size_t>(packet[pos + 1]);
+        pos += 2;
+        if (length == 0 || pos + length > packet.size()) return false;
+        countNalType(packet[pos] & 0x1f);
+        pos += length;
+    }
+
+    ++gStats.avccConfig;
+    return true;
+}
+
 void inspectPacket(const std::vector<std::uint8_t>& packet) {
     ++gStats.packets;
     gStats.bytes += packet.size();
@@ -101,9 +139,12 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
     }
     if (sawAnnexB) return;
 
+    // Android MediaCodec may expose csd-0 as an AVCDecoderConfigurationRecord (avcC).
+    if (inspectAvcDecoderConfig(packet)) return;
+
     // Also recognize AVC length-prefixed access units.
     std::size_t pos = 0;
-    bool parsedAvcc = false;
+    bool parsedLengthPrefixed = false;
     while (pos + 4 <= packet.size()) {
         const std::uint32_t length =
             (static_cast<std::uint32_t>(packet[pos]) << 24) |
@@ -112,14 +153,14 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
             static_cast<std::uint32_t>(packet[pos + 3]);
         pos += 4;
         if (length == 0 || pos + length > packet.size()) {
-            parsedAvcc = false;
+            parsedLengthPrefixed = false;
             break;
         }
-        parsedAvcc = true;
+        parsedLengthPrefixed = true;
         countNalType(packet[pos] & 0x1f);
         pos += length;
     }
-    if (parsedAvcc && pos == packet.size()) return;
+    if (parsedLengthPrefixed && pos == packet.size()) return;
 
     // Last-resort diagnostic for a raw single NAL packet.
     countNalType(packet[0] & 0x1f);
@@ -139,6 +180,7 @@ std::wstring streamStatusText(bool decodedNow) {
         << L" IDR=" << gStats.idr.load()
         << L" VCL=" << gStats.vcl.load()
         << L" last=" << gStats.lastNal.load();
+    out << L"\r\navcC config packets: " << gStats.avccConfig.load();
     out << L"\r\nDecoded NV12 frames: " << gStats.decoded.load();
     return out.str();
 }
@@ -172,7 +214,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
         gStatus = CreateWindowW(L"STATIC", L"Disconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 410, 130, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+            16, 88, 420, 150, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -252,6 +294,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             << L" IDR=" << gStats.idr.load()
             << L" VCL=" << gStats.vcl.load()
             << L" last=" << gStats.lastNal.load();
+        out << L" avcC=" << gStats.avccConfig.load();
         out << L"\r\nDecoded NV12 frames: " << gStats.decoded.load();
         setStatus(out.str());
         return 0;
@@ -285,7 +328,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 290,
+        CW_USEDEFAULT, CW_USEDEFAULT, 470, 320,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
