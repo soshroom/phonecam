@@ -1,7 +1,7 @@
 [Setup]
 AppId={{D2AD37A2-4579-4A2D-8E23-A7D9A67359B2}
 AppName=PhoneCam
-AppVersion=0.2.0
+AppVersion=0.2.1
 AppPublisher=soshroom
 DefaultDirName={autopf}\PhoneCam
 DefaultGroupName=PhoneCam
@@ -13,9 +13,12 @@ OutputBaseFilename=PhoneCamSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+CloseApplications=yes
+RestartApplications=no
+CloseApplicationsFilter=PhoneCam.exe
 
 [Files]
-Source: "..\..\build\windows\Release\PhoneCam.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\build\windows\Release\PhoneCam.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 Source: "..\..\build\windows\Release\PhoneCamSource.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 
 [Registry]
