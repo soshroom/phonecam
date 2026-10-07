@@ -23,7 +23,7 @@ target_link_libraries(PhoneCam PRIVATE
 )
 
 add_library(PhoneCamSource SHARED
-    source/PhoneCamSource.cpp
+    source/PhoneCamMediaSource.cpp
     source/PhoneCamSource.def
 )
 
