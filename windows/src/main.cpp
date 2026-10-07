@@ -139,10 +139,8 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
     }
     if (sawAnnexB) return;
 
-    // Android MediaCodec may expose csd-0 as an AVCDecoderConfigurationRecord (avcC).
     if (inspectAvcDecoderConfig(packet)) return;
 
-    // Also recognize AVC length-prefixed access units.
     std::size_t pos = 0;
     bool parsedLengthPrefixed = false;
     while (pos + 4 <= packet.size()) {
@@ -162,7 +160,6 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
     }
     if (parsedLengthPrefixed && pos == packet.size()) return;
 
-    // Last-resort diagnostic for a raw single NAL packet.
     countNalType(packet[0] & 0x1f);
 }
 
@@ -173,6 +170,7 @@ std::wstring streamStatusText(bool decodedNow) {
     } else {
         out << L"Connected to phone. Waiting for first decoded video frame...";
     }
+    out << L"\r\nWindows pipeline: 1920x1080 @ 30 FPS";
     out << L"\r\nPackets: " << gStats.packets.load()
         << L", bytes: " << gStats.bytes.load();
     out << L"\r\nNAL: SPS=" << gStats.sps.load()
@@ -214,7 +212,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
         gStatus = CreateWindowW(L"STATIC", L"Disconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 420, 150, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+            16, 88, 420, 170, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -239,7 +237,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
 
-            HRESULT hr = gDecoder.Initialize(1920, 1080, 15, [hwnd](std::vector<std::uint8_t> frame) {
+            HRESULT hr = gDecoder.Initialize(1920, 1080, 30, [hwnd](std::vector<std::uint8_t> frame) {
                 ++gStats.decoded;
                 gBridge.Publish(frame);
                 PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
@@ -328,7 +326,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 470, 320,
+        CW_USEDEFAULT, CW_USEDEFAULT, 470, 340,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
