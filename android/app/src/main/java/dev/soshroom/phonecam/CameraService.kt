@@ -42,6 +42,7 @@ class CameraService : Service() {
     private var repeatingBuilder: CaptureRequest.Builder? = null
     private var sensorRect: Rect? = null
     private var startedAt = 0L
+    @Volatile private var codecConfig: List<ByteArray> = emptyList()
 
     override fun onCreate() {
         super.onCreate()
@@ -135,6 +136,7 @@ class CameraService : Service() {
     }
 
     private fun setupEncoder(cfg: CameraConfig) {
+        codecConfig = emptyList()
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, cfg.width, cfg.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
@@ -224,13 +226,16 @@ class CameraService : Service() {
                 when (val index = codec.dequeueOutputBuffer(info, 10_000)) {
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         val format = codec.outputFormat
+                        val config = mutableListOf<ByteArray>()
                         listOf("csd-0", "csd-1").forEach { key ->
                             format.getByteBuffer(key)?.duplicate()?.let { csd ->
                                 val bytes = ByteArray(csd.remaining())
                                 csd.get(bytes)
-                                h264Server?.broadcast(bytes)
+                                if (bytes.isNotEmpty()) config += bytes
                             }
                         }
+                        codecConfig = config
+                        config.forEach { h264Server?.broadcast(it) }
                     }
                     else -> if (index >= 0) {
                         codec.getOutputBuffer(index)?.let { buffer ->
@@ -238,7 +243,10 @@ class CameraService : Service() {
                             buffer.limit(info.offset + info.size)
                             val bytes = ByteArray(info.size)
                             buffer.get(bytes)
-                            h264Server?.broadcast(bytes)
+                            if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                                codecConfig.forEach { h264Server?.broadcast(it) }
+                            }
+                            if (bytes.isNotEmpty()) h264Server?.broadcast(bytes)
                         }
                         codec.releaseOutputBuffer(index, false)
                     }
@@ -266,6 +274,7 @@ class CameraService : Service() {
         encoder = null
         encoderSurface?.release(); encoderSurface = null
         repeatingBuilder = null
+        codecConfig = emptyList()
     }
 
     private fun stopEverything() {
