@@ -1,0 +1,4 @@
+LIBRARY "PhoneCamSource"
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
