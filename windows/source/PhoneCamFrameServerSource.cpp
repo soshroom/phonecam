@@ -1,5 +1,7 @@
 #include <WinSock2.h>
 #include <windows.h>
+#include <ole2.h>
+#include <initguid.h>
 #include <ks.h>
 #include <ksproxy.h>
 #include <ksmedia.h>
@@ -125,7 +127,7 @@ public:
         if (!inputStreamId || !usage) return E_POINTER;
         if (streamId != kStreamId) return MF_E_INVALIDSTREAMNUMBER;
         *inputStreamId = kStreamId;
-        *usage = MFSampleAllocatorUsage_UsesCustomAllocator;
+        *usage = MFSampleAllocatorUsage_UsesProvidedAllocator;
         return S_OK;
     }
 
@@ -189,11 +191,13 @@ HRESULT CameraStream::BeginGetEvent(IMFAsyncCallback* callback, IUnknown* state)
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->BeginGetEvent(callback, state);
 }
+
 HRESULT CameraStream::EndGetEvent(IMFAsyncResult* result, IMFMediaEvent** event) {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->EndGetEvent(result, event);
 }
+
 HRESULT CameraStream::GetEvent(DWORD flags, IMFMediaEvent** event) {
     ComPtr<IMFMediaEventQueue> queue;
     {
@@ -204,11 +208,13 @@ HRESULT CameraStream::GetEvent(DWORD flags, IMFMediaEvent** event) {
     }
     return queue->GetEvent(flags, event);
 }
+
 HRESULT CameraStream::QueueEvent(MediaEventType type, REFGUID extendedType, HRESULT status, const PROPVARIANT* value) {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->QueueEventParamVar(type, extendedType, status, value);
 }
+
 HRESULT CameraStream::GetMediaSource(IMFMediaSource** source) {
     if (!source) return E_POINTER;
     *source = nullptr;
@@ -217,34 +223,38 @@ HRESULT CameraStream::GetMediaSource(IMFMediaSource** source) {
     if (FAILED(hr)) return hr;
     return source_->QueryInterface(IID_PPV_ARGS(source));
 }
+
 HRESULT CameraStream::GetStreamDescriptor(IMFStreamDescriptor** descriptor) {
     if (!descriptor) return E_POINTER;
     *descriptor = nullptr;
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
-    return FAILED(hr) ? hr : descriptor_.CopyTo(descriptor);
+    if (FAILED(hr)) return hr;
+    return descriptor_.CopyTo(descriptor);
 }
 
 HRESULT CameraStream::MakeSample(IMFSample** sample) {
     if (!sample) return E_POINTER;
     *sample = nullptr;
 
-    std::vector<std::uint8_t> frame;
-    const bool hasFrame = frames_ && frames_->Latest(frame) && frame.size() >= kFrameBytes;
-
     ComPtr<IMFMediaBuffer> buffer;
     HRESULT hr = MFCreateMemoryBuffer(kFrameBytes, &buffer);
     if (FAILED(hr)) return hr;
-    BYTE* dst = nullptr;
+
+    BYTE* bytes = nullptr;
     DWORD capacity = 0;
-    hr = buffer->Lock(&dst, &capacity, nullptr);
+    hr = buffer->Lock(&bytes, &capacity, nullptr);
     if (FAILED(hr)) return hr;
+
+    std::vector<std::uint8_t> frame;
+    const bool hasFrame = frames_ && frames_->Latest(frame) && frame.size() >= kFrameBytes;
     if (hasFrame) {
-        std::memcpy(dst, frame.data(), kFrameBytes);
+        std::memcpy(bytes, frame.data(), kFrameBytes);
     } else {
-        std::memset(dst, 0x10, kWidth * kHeight);
-        std::memset(dst + kWidth * kHeight, 0x80, kWidth * kHeight / 2);
+        std::memset(bytes, 16, kWidth * kHeight);
+        std::memset(bytes + kWidth * kHeight, 128, kWidth * kHeight / 2);
     }
+
     buffer->Unlock();
     buffer->SetCurrentLength(kFrameBytes);
 
@@ -264,20 +274,23 @@ HRESULT CameraStream::RequestSample(IUnknown* token) {
     HRESULT hr = Check();
     if (FAILED(hr)) return hr;
     if (state_ != MF_STREAM_STATE_RUNNING) return MF_E_INVALIDREQUEST;
+
     ComPtr<IMFSample> sample;
     hr = MakeSample(&sample);
     if (FAILED(hr)) return hr;
     if (token) sample->SetUnknown(MFSampleExtension_Token, token);
     return events_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.Get());
 }
+
 HRESULT CameraStream::Start(const PROPVARIANT* position) {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
     if (FAILED(hr)) return hr;
     state_ = MF_STREAM_STATE_RUNNING;
-    timestamp_ = (position && position->vt == VT_I8) ? position->hVal.QuadPart : 0;
+    timestamp_ = position && position->vt == VT_I8 ? position->hVal.QuadPart : MFGetSystemTime();
     return events_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, position);
 }
+
 HRESULT CameraStream::StopInternal() {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
@@ -285,16 +298,22 @@ HRESULT CameraStream::StopInternal() {
     state_ = MF_STREAM_STATE_STOPPED;
     return events_->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr);
 }
+
 HRESULT CameraStream::SetStreamState(MF_STREAM_STATE state) {
-    if (state == MF_STREAM_STATE_RUNNING) return Start(nullptr);
-    if (state == MF_STREAM_STATE_STOPPED) return StopInternal();
-    if (state == MF_STREAM_STATE_PAUSED) {
-        std::scoped_lock lock(mutex_);
-        state_ = state;
-        return S_OK;
+    switch (state) {
+        case MF_STREAM_STATE_RUNNING: return Start(nullptr);
+        case MF_STREAM_STATE_STOPPED: return StopInternal();
+        case MF_STREAM_STATE_PAUSED: {
+            std::scoped_lock lock(mutex_);
+            HRESULT hr = Check();
+            if (FAILED(hr)) return hr;
+            state_ = state;
+            return S_OK;
+        }
+        default: return E_INVALIDARG;
     }
-    return E_INVALIDARG;
 }
+
 HRESULT CameraStream::GetStreamState(MF_STREAM_STATE* state) {
     if (!state) return E_POINTER;
     std::scoped_lock lock(mutex_);
@@ -303,6 +322,7 @@ HRESULT CameraStream::GetStreamState(MF_STREAM_STATE* state) {
     *state = state_;
     return S_OK;
 }
+
 HRESULT CameraStream::ShutdownInternal() {
     std::scoped_lock lock(mutex_);
     if (shutdown_) return S_OK;
@@ -333,10 +353,10 @@ HRESULT CameraSource::Initialize(IMFAttributes* activationAttributes) {
     hr = stream_->Initialize(this, &frames_);
     if (FAILED(hr)) return hr;
 
-    ComPtr<IMFStreamDescriptor> descriptor;
-    hr = stream_->GetStreamDescriptor(&descriptor);
+    ComPtr<IMFStreamDescriptor> streamDescriptor;
+    hr = stream_->GetStreamDescriptor(&streamDescriptor);
     if (FAILED(hr)) return hr;
-    IMFStreamDescriptor* descriptors[] = { descriptor.Get() };
+    IMFStreamDescriptor* descriptors[] = { streamDescriptor.Get() };
     hr = MFCreatePresentationDescriptor(1, descriptors, &presentation_);
     if (FAILED(hr)) return hr;
     return presentation_->SelectStream(0);
@@ -347,11 +367,13 @@ HRESULT CameraSource::BeginGetEvent(IMFAsyncCallback* callback, IUnknown* state)
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->BeginGetEvent(callback, state);
 }
+
 HRESULT CameraSource::EndGetEvent(IMFAsyncResult* result, IMFMediaEvent** event) {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->EndGetEvent(result, event);
 }
+
 HRESULT CameraSource::GetEvent(DWORD flags, IMFMediaEvent** event) {
     ComPtr<IMFMediaEventQueue> queue;
     {
@@ -362,11 +384,13 @@ HRESULT CameraSource::GetEvent(DWORD flags, IMFMediaEvent** event) {
     }
     return queue->GetEvent(flags, event);
 }
+
 HRESULT CameraSource::QueueEvent(MediaEventType type, REFGUID extendedType, HRESULT status, const PROPVARIANT* value) {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
     return FAILED(hr) ? hr : events_->QueueEventParamVar(type, extendedType, status, value);
 }
+
 HRESULT CameraSource::GetCharacteristics(DWORD* characteristics) {
     if (!characteristics) return E_POINTER;
     std::scoped_lock lock(mutex_);
@@ -375,13 +399,16 @@ HRESULT CameraSource::GetCharacteristics(DWORD* characteristics) {
     *characteristics = MFMEDIASOURCE_IS_LIVE;
     return S_OK;
 }
+
 HRESULT CameraSource::CreatePresentationDescriptor(IMFPresentationDescriptor** descriptor) {
     if (!descriptor) return E_POINTER;
     *descriptor = nullptr;
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
-    return FAILED(hr) ? hr : presentation_->Clone(descriptor);
+    if (FAILED(hr)) return hr;
+    return presentation_->Clone(descriptor);
 }
+
 HRESULT CameraSource::Start(IMFPresentationDescriptor* descriptor, const GUID* timeFormat, const PROPVARIANT* startPosition) {
     if (!descriptor || !startPosition) return E_INVALIDARG;
     if (timeFormat && *timeFormat != GUID_NULL) return MF_E_UNSUPPORTED_TIME_FORMAT;
@@ -394,12 +421,13 @@ HRESULT CameraSource::Start(IMFPresentationDescriptor* descriptor, const GUID* t
     ComPtr<IMFStreamDescriptor> selectedDescriptor;
     hr = descriptor->GetStreamDescriptorByIndex(0, &selected, &selectedDescriptor);
     if (FAILED(hr)) return hr;
-    if (!selected) return E_INVALIDARG;
+    if (!selected) return MF_E_INVALIDREQUEST;
 
     ComPtr<IMFMediaStream> mediaStream;
     hr = stream_.As(&mediaStream);
     if (FAILED(hr)) return hr;
-    hr = events_->QueueEventParamUnk(streamAnnounced_ ? MEUpdatedStream : MENewStream, GUID_NULL, S_OK, mediaStream.Get());
+    hr = events_->QueueEventParamUnk(streamAnnounced_ ? MEUpdatedStream : MENewStream,
+        GUID_NULL, S_OK, mediaStream.Get());
     if (FAILED(hr)) return hr;
     streamAnnounced_ = true;
 
@@ -407,6 +435,7 @@ HRESULT CameraSource::Start(IMFPresentationDescriptor* descriptor, const GUID* t
     if (FAILED(hr)) return hr;
     return events_->QueueEventParamVar(MESourceStarted, GUID_NULL, S_OK, startPosition);
 }
+
 HRESULT CameraSource::Stop() {
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
@@ -415,6 +444,7 @@ HRESULT CameraSource::Stop() {
     if (FAILED(hr)) return hr;
     return events_->QueueEventParamVar(MESourceStopped, GUID_NULL, S_OK, nullptr);
 }
+
 HRESULT CameraSource::Shutdown() {
     std::scoped_lock lock(mutex_);
     if (shutdown_) return S_OK;
@@ -428,13 +458,16 @@ HRESULT CameraSource::Shutdown() {
     events_.Reset();
     return S_OK;
 }
+
 HRESULT CameraSource::GetSourceAttributes(IMFAttributes** attributes) {
     if (!attributes) return E_POINTER;
     *attributes = nullptr;
     std::scoped_lock lock(mutex_);
     HRESULT hr = Check();
-    return FAILED(hr) ? hr : attributes_.CopyTo(attributes);
+    if (FAILED(hr)) return hr;
+    return attributes_.CopyTo(attributes);
 }
+
 HRESULT CameraSource::GetStreamAttributes(DWORD streamId, IMFAttributes** attributes) {
     if (!attributes) return E_POINTER;
     *attributes = nullptr;
@@ -519,7 +552,9 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(module);
     return TRUE;
 }
+
 extern "C" HRESULT __stdcall DllCanUnloadNow() { return S_FALSE; }
+
 extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID riid, void** object) {
     if (!object) return E_POINTER;
     *object = nullptr;
