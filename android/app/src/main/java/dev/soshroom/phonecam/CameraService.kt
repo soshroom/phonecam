@@ -78,7 +78,14 @@ class CameraService : Service() {
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneCam::stream").apply { acquire() }
 
-        h264Server = H264Server(cfg.streamPort).also { it.start() }
+        h264Server = H264Server(cfg.streamPort) {
+            // A freshly connected decoder should not have to wait up to the normal I-frame interval.
+            runCatching {
+                encoder?.setParameters(Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+            }
+        }.also { it.start() }
         startedAt = SystemClock.elapsedRealtime()
         controlServer = ControlServer(
             context = this,
@@ -137,6 +144,7 @@ class CameraService : Service() {
 
     private fun setupEncoder(cfg: CameraConfig) {
         codecConfig = emptyList()
+        h264Server?.setCodecConfig(emptyList())
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, cfg.width, cfg.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
@@ -235,6 +243,7 @@ class CameraService : Service() {
                             }
                         }
                         codecConfig = config
+                        h264Server?.setCodecConfig(config)
                         config.forEach { h264Server?.broadcast(it) }
                     }
                     else -> if (index >= 0) {
@@ -275,6 +284,7 @@ class CameraService : Service() {
         encoderSurface?.release(); encoderSurface = null
         repeatingBuilder = null
         codecConfig = emptyList()
+        h264Server?.setCodecConfig(emptyList())
     }
 
     private fun stopEverything() {
