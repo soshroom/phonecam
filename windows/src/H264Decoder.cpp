@@ -31,12 +31,70 @@ bool StartsWithAnnexB(const std::vector<std::uint8_t>& data) {
     return StartCodeLength(data, 0) != 0;
 }
 
+void AppendAnnexBNal(std::vector<std::uint8_t>& out, const std::uint8_t* data, std::size_t size) {
+    if (!data || size == 0) return;
+    out.insert(out.end(), {0, 0, 0, 1});
+    out.insert(out.end(), data, data + size);
+}
+
+bool ParseAvcDecoderConfigurationRecord(
+    const std::vector<std::uint8_t>& packet,
+    std::vector<std::uint8_t>& annexB) {
+    // ISO/IEC 14496-15 AVCDecoderConfigurationRecord (avcC):
+    // version(1), profile, compatibility, level, lengthSizeMinusOne,
+    // numOfSPS, [spsLength+sps]..., numOfPPS, [ppsLength+pps]...
+    if (packet.size() < 7 || packet[0] != 1) return false;
+
+    std::size_t pos = 5;
+    if (pos >= packet.size()) return false;
+
+    const std::uint8_t spsCount = packet[pos++] & 0x1f;
+    if (spsCount == 0) return false;
+
+    std::vector<std::uint8_t> converted;
+    for (std::uint8_t i = 0; i < spsCount; ++i) {
+        if (pos + 2 > packet.size()) return false;
+        const std::size_t length =
+            (static_cast<std::size_t>(packet[pos]) << 8) |
+            static_cast<std::size_t>(packet[pos + 1]);
+        pos += 2;
+        if (length == 0 || pos + length > packet.size()) return false;
+        AppendAnnexBNal(converted, packet.data() + pos, length);
+        pos += length;
+    }
+
+    if (pos >= packet.size()) return false;
+    const std::uint8_t ppsCount = packet[pos++];
+    if (ppsCount == 0) return false;
+
+    for (std::uint8_t i = 0; i < ppsCount; ++i) {
+        if (pos + 2 > packet.size()) return false;
+        const std::size_t length =
+            (static_cast<std::size_t>(packet[pos]) << 8) |
+            static_cast<std::size_t>(packet[pos + 1]);
+        pos += 2;
+        if (length == 0 || pos + length > packet.size()) return false;
+        AppendAnnexBNal(converted, packet.data() + pos, length);
+        pos += length;
+    }
+
+    if (converted.empty()) return false;
+    annexB = std::move(converted);
+    return true;
+}
+
 std::vector<std::uint8_t> NormalizeAnnexB(const std::vector<std::uint8_t>& packet) {
     if (packet.empty() || StartsWithAnnexB(packet)) return packet;
 
-    // Some encoders expose AVC/avcC style packets: [4-byte big-endian length][NAL]...
-    // Convert them to the Annex B representation expected by the Windows H.264 decoder.
+    // Some Android MediaCodec implementations expose csd-0 as a complete avcC
+    // AVCDecoderConfigurationRecord instead of Annex B SPS/PPS NAL units.
     std::vector<std::uint8_t> converted;
+    if (ParseAvcDecoderConfigurationRecord(packet, converted)) {
+        return converted;
+    }
+
+    // Some encoders expose AVC length-prefixed samples: [4-byte big-endian length][NAL]...
+    // Convert them to the Annex B representation expected by the Windows H.264 decoder.
     std::size_t pos = 0;
     bool parsedLengthPrefixed = false;
     while (pos + 4 <= packet.size()) {
@@ -51,8 +109,7 @@ std::vector<std::uint8_t> NormalizeAnnexB(const std::vector<std::uint8_t>& packe
             break;
         }
         parsedLengthPrefixed = true;
-        converted.insert(converted.end(), {0, 0, 0, 1});
-        converted.insert(converted.end(), packet.begin() + pos, packet.begin() + pos + length);
+        AppendAnnexBNal(converted, packet.data() + pos, length);
         pos += length;
     }
 
@@ -60,10 +117,9 @@ std::vector<std::uint8_t> NormalizeAnnexB(const std::vector<std::uint8_t>& packe
         return converted;
     }
 
-    // Android AVC CSD is defined as Annex B, but tolerate devices that return a raw NAL.
+    // Tolerate devices that expose one raw NAL without a start code.
     converted.clear();
-    converted.insert(converted.end(), {0, 0, 0, 1});
-    converted.insert(converted.end(), packet.begin(), packet.end());
+    AppendAnnexBNal(converted, packet.data(), packet.size());
     return converted;
 }
 
@@ -71,7 +127,7 @@ std::vector<NalUnit> ParseNals(const std::vector<std::uint8_t>& data) {
     std::vector<NalUnit> result;
     std::size_t pos = 0;
     while (pos < data.size()) {
-        std::size_t code = StartCodeLength(data, pos);
+        const std::size_t code = StartCodeLength(data, pos);
         if (code == 0) {
             ++pos;
             continue;
@@ -187,11 +243,10 @@ HRESULT H264Decoder::Push(const std::vector<std::uint8_t>& packet) {
         }
     }
 
-    // CSD packets have no frame timestamp and must not be submitted as stand-alone frames.
+    // Codec configuration has no frame timestamp and is cached until an IDR arrives.
     if (!hasVcl) return S_OK;
 
-    // Start decoding from an IDR only. This also avoids presenting an arbitrary delta frame
-    // when the Windows client connects in the middle of an already running phone stream.
+    // A random P/B frame cannot start a decoder. Wait for SPS + PPS + IDR.
     if (!started_) {
         if (!hasIdr || sps_.empty() || pps_.empty()) return S_OK;
         started_ = true;
@@ -199,8 +254,8 @@ HRESULT H264Decoder::Push(const std::vector<std::uint8_t>& packet) {
 
     std::vector<std::uint8_t> accessUnit;
     if (hasIdr) {
-        // The Microsoft H.264 decoder scans the byte stream for SPS/PPS. Put them directly
-        // in front of every IDR so reconnects and decoder resets are deterministic.
+        // The Microsoft H.264 decoder scans the Annex B byte stream for parameter sets.
+        // Repeat them directly before each IDR for deterministic reconnect/reset behavior.
         if (!containsSps && !sps_.empty()) accessUnit.insert(accessUnit.end(), sps_.begin(), sps_.end());
         if (!containsPps && !pps_.empty()) accessUnit.insert(accessUnit.end(), pps_.begin(), pps_.end());
     }
