@@ -17,6 +17,7 @@ import android.media.MediaFormat
 import android.os.*
 import android.util.Range
 import android.util.Size
+import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,6 +30,7 @@ class CameraService : Service() {
     private var camera: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var encoder: MediaCodec? = null
+    private var encoderSurface: Surface? = null
     private var encoderThread: Thread? = null
     private var imageReader: ImageReader? = null
     private var h264Server: H264Server? = null
@@ -85,7 +87,7 @@ class CameraService : Service() {
             uptime = { SystemClock.elapsedRealtime() - startedAt },
             applySettings = { applyConfig(it) },
             stopCamera = { stopEverything() },
-        ).also { it.start(NanoTimeout.SOCKET_READ_TIMEOUT, false) }
+        ).also { it.start(5000, false) }
 
         running = true
         restartCamera(cfg)
@@ -114,11 +116,9 @@ class CameraService : Service() {
 
     private fun restartCamera(cfg: CameraConfig) {
         closeCameraPipeline()
-        currentConfig = cfg
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val cameraId = chooseCamera(cfg.cameraId)
         currentConfig = cfg.copy(cameraId = cameraId).also { it.save(this) }
-
         val characteristics = manager.getCameraCharacteristics(cameraId)
         sensorRect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         setupEncoder(currentConfig!!)
@@ -143,9 +143,10 @@ class CameraService : Service() {
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
         }
-        encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-            configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            start()
+        encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { codec ->
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoderSurface = codec.createInputSurface()
+            codec.start()
         }
         draining.set(true)
         encoderThread = Thread({ drainEncoder() }, "phonecam-encoder").also { it.start() }
@@ -167,14 +168,13 @@ class CameraService : Service() {
 
     private fun createSession(cfg: CameraConfig) {
         val device = camera ?: return
-        val codec = encoder ?: return
-        val encoderSurface = codec.createInputSurfaceSafe()
+        val videoSurface = encoderSurface ?: return
         val previewSurface = imageReader?.surface ?: return
-        device.createCaptureSession(listOf(encoderSurface, previewSurface), object : CameraCaptureSession.StateCallback() {
+        device.createCaptureSession(listOf(videoSurface, previewSurface), object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(captureSession: CameraCaptureSession) {
                 session = captureSession
                 repeatingBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    addTarget(encoderSurface)
+                    addTarget(videoSurface)
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                 }
                 rebuildRepeating(cfg)
@@ -183,8 +183,6 @@ class CameraService : Service() {
             override fun onConfigureFailed(captureSession: CameraCaptureSession) = Unit
         }, cameraHandler)
     }
-
-    private fun MediaCodec.createInputSurfaceSafe() = createInputSurface()
 
     private fun rebuildRepeating(cfg: CameraConfig) {
         val builder = repeatingBuilder ?: return
@@ -201,7 +199,7 @@ class CameraService : Service() {
         runCatching { captureSession.setRepeatingRequest(builder.build(), null, cameraHandler) }
     }
 
-    private fun schedulePreview(device: CameraDevice, previewSurface: android.view.Surface) {
+    private fun schedulePreview(device: CameraDevice, previewSurface: Surface) {
         cameraHandler.post(object : Runnable {
             override fun run() {
                 if (!running || session == null) return
@@ -223,9 +221,18 @@ class CameraService : Service() {
         while (draining.get()) {
             val codec = encoder ?: break
             try {
-                val index = codec.dequeueOutputBuffer(info, 10_000)
-                when {
-                    index >= 0 -> {
+                when (val index = codec.dequeueOutputBuffer(info, 10_000)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val format = codec.outputFormat
+                        listOf("csd-0", "csd-1").forEach { key ->
+                            format.getByteBuffer(key)?.duplicate()?.let { csd ->
+                                val bytes = ByteArray(csd.remaining())
+                                csd.get(bytes)
+                                h264Server?.broadcast(bytes)
+                            }
+                        }
+                    }
+                    else -> if (index >= 0) {
                         codec.getOutputBuffer(index)?.let { buffer ->
                             buffer.position(info.offset)
                             buffer.limit(info.offset + info.size)
@@ -234,16 +241,6 @@ class CameraService : Service() {
                             h264Server?.broadcast(bytes)
                         }
                         codec.releaseOutputBuffer(index, false)
-                    }
-                    index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        val f = codec.outputFormat
-                        listOf("csd-0", "csd-1").forEach { key ->
-                            f.getByteBuffer(key)?.let { csd ->
-                                val copy = ByteArray(csd.remaining())
-                                csd.get(copy)
-                                h264Server?.broadcast(copy)
-                            }
-                        }
                     }
                 }
             } catch (_: Exception) {
@@ -267,6 +264,7 @@ class CameraService : Service() {
         encoderThread?.interrupt(); encoderThread = null
         encoder?.let { runCatching { it.stop() }; runCatching { it.release() } }
         encoder = null
+        encoderSurface?.release(); encoderSurface = null
         repeatingBuilder = null
     }
 
@@ -281,14 +279,16 @@ class CameraService : Service() {
     }
 
     override fun onDestroy() {
-        stopEverything()
+        if (running) stopEverything()
         cameraThread.quitSafely()
         super.onDestroy()
     }
 
     private fun createNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "PhoneCam streaming", NotificationManager.IMPORTANCE_LOW))
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "PhoneCam streaming", NotificationManager.IMPORTANCE_LOW)
+        )
     }
 
     companion object {
@@ -300,5 +300,3 @@ class CameraService : Service() {
         private const val NOTIFICATION_ID = 1
     }
 }
-
-private object NanoTimeout { const val SOCKET_READ_TIMEOUT = 5000 }
