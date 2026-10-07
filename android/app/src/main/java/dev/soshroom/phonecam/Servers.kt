@@ -13,10 +13,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
-class H264Server(private val port: Int) {
+class H264Server(
+    private val port: Int,
+    private val onClientConnected: (() -> Unit)? = null,
+) {
     private var server: ServerSocket? = null
     private val clients = ConcurrentHashMap.newKeySet<Socket>()
     private val executor = Executors.newCachedThreadPool()
+    @Volatile private var codecConfig: List<ByteArray> = emptyList()
 
     fun start() {
         server = ServerSocket(port)
@@ -28,6 +32,11 @@ class H264Server(private val port: Int) {
                         keepAlive = true
                     }
                     clients.add(socket)
+
+                    // A client can connect long after MediaCodec emitted INFO_OUTPUT_FORMAT_CHANGED.
+                    // Send the cached SPS/PPS or avcC record immediately so the decoder can start.
+                    codecConfig.forEach { sendPacket(socket, it) }
+                    onClientConnected?.invoke()
                 } catch (_: Exception) {
                     break
                 }
@@ -35,16 +44,25 @@ class H264Server(private val port: Int) {
         }
     }
 
+    fun setCodecConfig(config: List<ByteArray>) {
+        codecConfig = config.map { it.copyOf() }
+    }
+
+    private fun sendPacket(socket: Socket, data: ByteArray) {
+        if (data.isEmpty()) return
+        synchronized(socket) {
+            val out = DataOutputStream(socket.getOutputStream())
+            out.writeInt(data.size)
+            out.write(data)
+            out.flush()
+        }
+    }
+
     fun broadcast(data: ByteArray) {
         if (data.isEmpty()) return
         clients.toList().forEach { socket ->
             try {
-                synchronized(socket) {
-                    val out = DataOutputStream(socket.getOutputStream())
-                    out.writeInt(data.size)
-                    out.write(data)
-                    out.flush()
-                }
+                sendPacket(socket, data)
             } catch (_: Exception) {
                 clients.remove(socket)
                 runCatching { socket.close() }
@@ -58,6 +76,7 @@ class H264Server(private val port: Int) {
         runCatching { server?.close() }
         clients.forEach { runCatching { it.close() } }
         clients.clear()
+        codecConfig = emptyList()
         executor.shutdownNow()
     }
 }
