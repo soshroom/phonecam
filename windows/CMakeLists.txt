@@ -21,3 +21,20 @@ target_link_libraries(PhoneCam PRIVATE
     ole32
     shlwapi
 )
+
+add_library(PhoneCamSource SHARED
+    source/PhoneCamSource.cpp
+)
+
+target_compile_definitions(PhoneCamSource PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PhoneCamSource PRIVATE
+    mfplat
+    mf
+    mfuuid
+    ole32
+)
+
+# Avoid requiring a separate VC runtime installation inside Windows Frame Server.
+if(MSVC)
+    set_property(TARGET PhoneCamSource PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
