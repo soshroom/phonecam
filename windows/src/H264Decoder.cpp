@@ -40,9 +40,6 @@ void AppendAnnexBNal(std::vector<std::uint8_t>& out, const std::uint8_t* data, s
 bool ParseAvcDecoderConfigurationRecord(
     const std::vector<std::uint8_t>& packet,
     std::vector<std::uint8_t>& annexB) {
-    // ISO/IEC 14496-15 AVCDecoderConfigurationRecord (avcC):
-    // version(1), profile, compatibility, level, lengthSizeMinusOne,
-    // numOfSPS, [spsLength+sps]..., numOfPPS, [ppsLength+pps]...
     if (packet.size() < 7 || packet[0] != 1) return false;
 
     std::size_t pos = 5;
@@ -86,15 +83,11 @@ bool ParseAvcDecoderConfigurationRecord(
 std::vector<std::uint8_t> NormalizeAnnexB(const std::vector<std::uint8_t>& packet) {
     if (packet.empty() || StartsWithAnnexB(packet)) return packet;
 
-    // Some Android MediaCodec implementations expose csd-0 as a complete avcC
-    // AVCDecoderConfigurationRecord instead of Annex B SPS/PPS NAL units.
     std::vector<std::uint8_t> converted;
     if (ParseAvcDecoderConfigurationRecord(packet, converted)) {
         return converted;
     }
 
-    // Some encoders expose AVC length-prefixed samples: [4-byte big-endian length][NAL]...
-    // Convert them to the Annex B representation expected by the Windows H.264 decoder.
     std::size_t pos = 0;
     bool parsedLengthPrefixed = false;
     while (pos + 4 <= packet.size()) {
@@ -117,7 +110,6 @@ std::vector<std::uint8_t> NormalizeAnnexB(const std::vector<std::uint8_t>& packe
         return converted;
     }
 
-    // Tolerate devices that expose one raw NAL without a start code.
     converted.clear();
     AppendAnnexBNal(converted, packet.data(), packet.size());
     return converted;
@@ -148,6 +140,61 @@ std::vector<NalUnit> ParseNals(const std::vector<std::uint8_t>& data) {
 
 std::vector<std::uint8_t> CopyNal(const std::vector<std::uint8_t>& data, const NalUnit& nal) {
     return std::vector<std::uint8_t>(data.begin() + nal.start, data.begin() + nal.end);
+}
+
+std::vector<std::uint8_t> PackTightNv12(
+    const BYTE* data,
+    DWORD currentLength,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t strideHint,
+    std::uint32_t storageHeightHint) {
+    if (!data || width == 0 || height == 0) return {};
+
+    const std::size_t expected = static_cast<std::size_t>(width) * height * 3 / 2;
+    if (currentLength < expected) return {};
+
+    std::size_t stride = std::max<std::uint32_t>(width, strideHint ? strideHint : width);
+    std::size_t storageHeight = std::max<std::uint32_t>(height, storageHeightHint ? storageHeightHint : height);
+
+    // Hardware H.264 decoders commonly store a 1920x1080 image in a 1920x1088
+    // surface because coded H.264 dimensions are macroblock aligned. In that case
+    // the UV plane starts after 1088 luma rows, not after the visible 1080 rows.
+    const std::size_t numerator = static_cast<std::size_t>(currentLength) * 2;
+    const std::size_t denominator = stride * 3;
+    if (denominator != 0 && numerator % denominator == 0) {
+        const std::size_t inferredHeight = numerator / denominator;
+        if (inferredHeight >= height) storageHeight = inferredHeight;
+    }
+
+    const std::size_t uvOffset = stride * storageHeight;
+    const std::size_t required = uvOffset + stride * (height / 2);
+    if (stride < width || required > currentLength) {
+        // If Media Foundation already returned tightly packed NV12, use it directly.
+        return std::vector<std::uint8_t>(data, data + expected);
+    }
+
+    if (stride == width && storageHeight == height && currentLength == expected) {
+        return std::vector<std::uint8_t>(data, data + expected);
+    }
+
+    std::vector<std::uint8_t> packed(expected);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::memcpy(
+            packed.data() + static_cast<std::size_t>(y) * width,
+            data + static_cast<std::size_t>(y) * stride,
+            width);
+    }
+
+    BYTE* dstUv = packed.data() + static_cast<std::size_t>(width) * height;
+    const BYTE* srcUv = data + uvOffset;
+    for (std::uint32_t y = 0; y < height / 2; ++y) {
+        std::memcpy(
+            dstUv + static_cast<std::size_t>(y) * width,
+            srcUv + static_cast<std::size_t>(y) * stride,
+            width);
+    }
+    return packed;
 }
 
 } // namespace
@@ -243,10 +290,8 @@ HRESULT H264Decoder::Push(const std::vector<std::uint8_t>& packet) {
         }
     }
 
-    // Codec configuration has no frame timestamp and is cached until an IDR arrives.
     if (!hasVcl) return S_OK;
 
-    // A random P/B frame cannot start a decoder. Wait for SPS + PPS + IDR.
     if (!started_) {
         if (!hasIdr || sps_.empty() || pps_.empty()) return S_OK;
         started_ = true;
@@ -254,8 +299,6 @@ HRESULT H264Decoder::Push(const std::vector<std::uint8_t>& packet) {
 
     std::vector<std::uint8_t> accessUnit;
     if (hasIdr) {
-        // The Microsoft H.264 decoder scans the Annex B byte stream for parameter sets.
-        // Repeat them directly before each IDR for deterministic reconnect/reset behavior.
         if (!containsSps && !sps_.empty()) accessUnit.insert(accessUnit.end(), sps_.begin(), sps_.end());
         if (!containsPps && !pps_.empty()) accessUnit.insert(accessUnit.end(), pps_.begin(), pps_.end());
     }
@@ -366,13 +409,27 @@ HRESULT H264Decoder::Drain() {
         DWORD currentLength = 0;
         hr = contiguous->Lock(&data, &maxLength, &currentLength);
         if (FAILED(hr)) return hr;
-        if (currentLength > 0 && handler_) {
-            std::vector<std::uint8_t> frame(data, data + currentLength);
-            contiguous->Unlock();
-            handler_(std::move(frame));
-        } else {
-            contiguous->Unlock();
+
+        std::uint32_t stride = width_;
+        std::uint32_t storageHeight = height_;
+        ComPtr<IMFMediaType> currentType;
+        if (SUCCEEDED(decoder_->GetOutputCurrentType(0, &currentType))) {
+            UINT32 typeWidth = 0;
+            UINT32 typeHeight = 0;
+            if (SUCCEEDED(MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, &typeWidth, &typeHeight))) {
+                if (typeHeight >= height_) storageHeight = typeHeight;
+            }
+            UINT32 rawStride = 0;
+            if (SUCCEEDED(currentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride))) {
+                const LONG signedStride = static_cast<LONG>(rawStride);
+                const auto absStride = static_cast<std::uint32_t>(signedStride < 0 ? -signedStride : signedStride);
+                if (absStride >= width_) stride = absStride;
+            }
         }
+
+        auto frame = PackTightNv12(data, currentLength, width_, height_, stride, storageHeight);
+        contiguous->Unlock();
+        if (!frame.empty() && handler_) handler_(std::move(frame));
     }
 }
 
