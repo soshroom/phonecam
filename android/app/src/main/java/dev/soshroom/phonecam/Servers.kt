@@ -32,9 +32,6 @@ class H264Server(
                         keepAlive = true
                     }
                     clients.add(socket)
-
-                    // A client can connect long after MediaCodec emitted INFO_OUTPUT_FORMAT_CHANGED.
-                    // Send the cached SPS/PPS or avcC record immediately so the decoder can start.
                     codecConfig.forEach { sendPacket(socket, it) }
                     onClientConnected?.invoke()
                 } catch (_: Exception) {
@@ -87,6 +84,8 @@ class ControlServer(
     private val snapshot: AtomicReference<ByteArray?>,
     private val clients: () -> Int,
     private val uptime: () -> Long,
+    private val encoderFps: () -> Double,
+    private val fpsRange: () -> String,
     private val applySettings: (CameraConfig) -> Unit,
     private val stopCamera: () -> Unit,
 ) : NanoHTTPD(port) {
@@ -122,10 +121,13 @@ class ControlServer(
         val percent = if (level >= 0) level * 100 / scale.coerceAtLeast(1) else -1
         val json = """{
             "running":true,
+            "version":"${escape(BuildConfig.VERSION_NAME)}",
             "cameraId":"${escape(cfg.cameraId)}",
             "width":${cfg.width},
             "height":${cfg.height},
             "fps":${cfg.fps},
+            "encoderFps":${"%.2f".format(java.util.Locale.US, encoderFps())},
+            "fpsRange":"${escape(fpsRange())}",
             "bitrate":${cfg.bitrate},
             "zoom":${cfg.zoom},
             "clients":${clients()},
@@ -191,7 +193,7 @@ let initialized=false;
 async function refresh(){
  try{
   const r=await fetch('/api/status',{cache:'no-store'}); const s=await r.json();
-  status.textContent=s.width+'x'+s.height+' @ '+s.fps+' FPS\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
+  status.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder: '+Number(s.encoderFps).toFixed(1)+' FPS, AE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
  }catch(e){status.textContent='offline';}
  preview.src='/preview.jpg?t='+Date.now();
