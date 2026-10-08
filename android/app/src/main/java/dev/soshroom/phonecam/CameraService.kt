@@ -20,6 +20,7 @@ import android.util.Size
 import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -45,8 +46,12 @@ class CameraService : Service() {
     @Volatile private var codecConfig: List<ByteArray> = emptyList()
     @Volatile private var selectedFpsRange = "unknown"
     @Volatile private var encoderFps = 0.0
+    @Volatile private var encoderOutputBufferFps = 0.0
+    @Volatile private var encoderPartialBuffers = 0L
     private var encoderFrameCount = 0L
     private var encoderFpsStartedAt = 0L
+    private var encoderOutputBufferCount = 0L
+    private var encoderOutputFpsStartedAt = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -97,6 +102,8 @@ class CameraService : Service() {
             clients = { h264Server?.clientCount() ?: 0 },
             uptime = { SystemClock.elapsedRealtime() - startedAt },
             encoderFps = { encoderFps },
+            encoderOutputBufferFps = { encoderOutputBufferFps },
+            partialBuffers = { encoderPartialBuffers },
             fpsRange = { selectedFpsRange },
             applySettings = { applyConfig(it) },
             stopCamera = { stopEverything() },
@@ -153,6 +160,10 @@ class CameraService : Service() {
         encoderFrameCount = 0
         encoderFps = 0.0
         encoderFpsStartedAt = SystemClock.elapsedRealtime()
+        encoderOutputBufferCount = 0
+        encoderOutputBufferFps = 0.0
+        encoderOutputFpsStartedAt = encoderFpsStartedAt
+        encoderPartialBuffers = 0
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, cfg.width, cfg.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
@@ -274,8 +285,41 @@ class CameraService : Service() {
         }
     }
 
+    private fun updateEncoderOutputBufferFps() {
+        ++encoderOutputBufferCount
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - encoderOutputFpsStartedAt
+        if (elapsed >= 2000) {
+            encoderOutputBufferFps = encoderOutputBufferCount * 1000.0 / elapsed
+            encoderOutputBufferCount = 0
+            encoderOutputFpsStartedAt = now
+        }
+    }
+
+    private fun emitAccessUnit(bytes: ByteArray, flags: Int) {
+        if (bytes.isEmpty()) return
+        updateEncoderFps()
+        if ((flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+            codecConfig.forEach { h264Server?.broadcast(it) }
+        }
+        h264Server?.broadcast(bytes)
+    }
+
     private fun drainEncoder() {
         val info = MediaCodec.BufferInfo()
+        val pending = ByteArrayOutputStream()
+        var pendingPtsUs: Long? = null
+        var pendingFlags = 0
+
+        fun flushPending() {
+            if (pending.size() > 0) {
+                emitAccessUnit(pending.toByteArray(), pendingFlags)
+            }
+            pending.reset()
+            pendingPtsUs = null
+            pendingFlags = 0
+        }
+
         while (draining.get()) {
             val codec = encoder ?: break
             try {
@@ -300,16 +344,28 @@ class CameraService : Service() {
                             val bytes = ByteArray(info.size)
                             buffer.get(bytes)
 
-                            val isCodecConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                            val flags = info.flags
+                            val isCodecConfig = (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                             if (isCodecConfig && bytes.isNotEmpty()) {
                                 updateCodecConfig(listOf(bytes))
                                 h264Server?.broadcast(bytes)
-                            } else {
-                                if (bytes.isNotEmpty()) updateEncoderFps()
-                                if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-                                    codecConfig.forEach { h264Server?.broadcast(it) }
+                            } else if (bytes.isNotEmpty()) {
+                                updateEncoderOutputBufferFps()
+                                if ((flags and MediaCodec.BUFFER_FLAG_PARTIAL_FRAME) != 0) {
+                                    ++encoderPartialBuffers
                                 }
-                                if (bytes.isNotEmpty()) h264Server?.broadcast(bytes)
+
+                                val ptsUs = info.presentationTimeUs
+                                if (pendingPtsUs != null && pendingPtsUs != ptsUs) {
+                                    flushPending()
+                                }
+                                if (pendingPtsUs == null) pendingPtsUs = ptsUs
+                                pending.write(bytes)
+                                pendingFlags = pendingFlags or flags
+
+                                if ((flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                    flushPending()
+                                }
                             }
                         }
                         codec.releaseOutputBuffer(index, false)
@@ -319,6 +375,7 @@ class CameraService : Service() {
                 break
             }
         }
+        flushPending()
     }
 
     private fun chooseCamera(requested: String): String {
@@ -341,6 +398,8 @@ class CameraService : Service() {
         codecConfig = emptyList()
         h264Server?.setCodecConfig(emptyList())
         encoderFps = 0.0
+        encoderOutputBufferFps = 0.0
+        encoderPartialBuffers = 0
         selectedFpsRange = "unknown"
     }
 
