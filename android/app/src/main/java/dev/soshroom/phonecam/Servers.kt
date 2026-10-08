@@ -5,13 +5,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import fi.iki.elonen.NanoHTTPD
-import java.io.ByteArrayInputStream
 import java.io.DataOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
 
 class H264Server(
     private val port: Int,
@@ -81,7 +79,6 @@ class H264Server(
 class ControlServer(
     private val context: Context,
     port: Int,
-    private val snapshot: AtomicReference<ByteArray?>,
     private val clients: () -> Int,
     private val uptime: () -> Long,
     private val encoderFps: () -> Double,
@@ -95,7 +92,6 @@ class ControlServer(
     override fun serve(session: IHTTPSession): Response {
         return when {
             session.uri == "/" -> newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", PAGE)
-            session.uri == "/preview.jpg" -> preview()
             session.uri == "/api/status" -> status()
             session.uri == "/api/settings" && session.method == Method.POST -> update(session)
             session.uri == "/api/stop" && session.method == Method.POST -> {
@@ -107,12 +103,6 @@ class ControlServer(
             addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
             addHeader("Pragma", "no-cache")
         }
-    }
-
-    private fun preview(): Response {
-        val data = snapshot.get()
-            ?: return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "preview unavailable")
-        return newFixedLengthResponse(Response.Status.OK, "image/jpeg", ByteArrayInputStream(data), data.size.toLong())
     }
 
     private fun status(): Response {
@@ -177,13 +167,12 @@ class ControlServer(
 body{font:15px system-ui,sans-serif;max-width:820px;margin:30px auto;padding:0 16px;background:#111;color:#eee}
 .header{display:flex;align-items:baseline;gap:10px}.version{color:#999;font-size:14px;font-weight:400}
 .card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:14px}
-img{width:100%;max-width:640px;background:#000;border-radius:8px}label{display:block;margin:9px 0 3px}
+label{display:block;margin:9px 0 3px}
 input{width:180px;padding:7px;background:#111;color:#eee;border:1px solid #444;border-radius:5px}
 button{padding:8px 14px;margin:12px 6px 0 0}pre{white-space:pre-wrap}
 </style>
 </head><body>
 <div class="header"><h1>PhoneCam</h1><span class="version">v${BuildConfig.VERSION_NAME}</span></div>
-<div class="card"><img id="preview" alt="preview"></div>
 <div class="card"><pre id="statusText">loading status...</pre></div>
 <div class="card">
 <label>Camera ID</label><input id="cameraId">
@@ -196,7 +185,6 @@ button{padding:8px 14px;margin:12px 6px 0 0}pre{white-space:pre-wrap}
 </div>
 <script>
 const statusEl=document.getElementById('statusText');
-const previewEl=document.getElementById('preview');
 let initialized=false;
 async function refresh(){
  try{
@@ -206,7 +194,6 @@ async function refresh(){
   statusEl.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder frames: '+Number(s.encoderFps).toFixed(1)+' FPS\nEncoder buffers: '+Number(s.encoderOutputBufferFps).toFixed(1)+' FPS, partial buffers: '+s.partialBuffers+'\nAE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
  }catch(e){statusEl.textContent='Status error: '+e.message;}
- previewEl.src='/preview.jpg?t='+Date.now();
 }
 async function applySettings(){
  const body=new URLSearchParams(); ['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>body.set(k,document.getElementById(k).value));
