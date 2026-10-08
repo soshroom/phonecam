@@ -82,7 +82,6 @@ http://PHONE_IP:8080
 
 The page provides:
 
-- a lightweight JPEG preview, refreshed approximately once per second
 - requested resolution and FPS
 - measured encoder FPS
 - active camera AE FPS range
@@ -92,6 +91,8 @@ The page provides:
 - battery percentage and battery temperature
 - runtime settings
 - stop control
+
+There is intentionally no browser video/JPEG preview. The camera session is dedicated to the H.264 stream so browser monitoring cannot introduce extra Camera2 capture requests or disturb the video pipeline. Live video should be checked through the Windows virtual camera.
 
 Changing camera ID, resolution or FPS restarts the Android camera/encoder pipeline. Bitrate and zoom can be applied without a full restart.
 
@@ -125,51 +126,48 @@ After that, applications using the Windows camera stack should be able to see **
 
      Camera2
         |
-        +-----------------------------+
-        |                             |
-        v                             v
- MediaCodec H.264               JPEG ImageReader
- hardware encoder                low-rate preview
-        |                             |
-        | TCP :8554                   | HTTP :8080
-        |                             |
-        +--------------- LAN ---------+
-                        |
-                        v
-                   Windows client
-                        |
-                 NetworkReceiver
-                        |
-                        v
-               Media Foundation
-                 H.264 decoder
-                        |
-                 decoded NV12
-                        |
-                        v
-               local FrameBridge
-                 127.0.0.1:8765
-                        |
-                        v
-              PhoneCamSource.dll
-          Media Foundation media source
-                        |
-                        v
-              Windows virtual camera
-                    "PhoneCam"
-                        |
-                        v
-             browser / call / video app
+        v
+ MediaCodec H.264
+ hardware encoder
+        |
+        | TCP :8554
+        |
+        +--------------- LAN ----------------+
+                                             |
+                                             v
+                                        Windows client
+                                             |
+                                      NetworkReceiver
+                                             |
+                                             v
+                                    Media Foundation
+                                      H.264 decoder
+                                             |
+                                      decoded NV12
+                                             |
+                                             v
+                                    local FrameBridge
+                                      127.0.0.1:8765
+                                             |
+                                             v
+                                   PhoneCamSource.dll
+                               Media Foundation media source
+                                             |
+                                             v
+                                   Windows virtual camera
+                                         "PhoneCam"
+                                             |
+                                             v
+                                  browser / call / video app
+
+ Android HTTP control/status server remains available separately on :8080.
 ```
 
 ### Android capture path
 
 `CameraService` owns the Android camera pipeline.
 
-It creates two camera outputs:
-
-- a `MediaCodec` input surface for the H.264 video stream
-- a small JPEG `ImageReader` used only by the browser preview
+The Camera2 session has a single output target: the `MediaCodec` input surface used for the H.264 video stream. The browser preview and JPEG `ImageReader` path were removed so periodic snapshot captures cannot interrupt the recording pipeline or retrigger camera AF/AE behavior.
 
 The encoder is configured for AVC/H.264, constant bitrate, no B-frames and a two-second keyframe interval. When a Windows client connects, the service requests a fresh sync frame so startup does not have to wait for the next normal keyframe.
 
@@ -210,7 +208,7 @@ The loopback bridge is intentionally bound only to localhost. It is not exposed 
 
 | Port | Side | Purpose | Exposure |
 | --- | --- | --- | --- |
-| `8080/tcp` | Android | browser preview, status and controls | LAN |
+| `8080/tcp` | Android | browser status and controls | LAN |
 | `8554/tcp` | Android | length-prefixed H.264 stream | LAN |
 | `8765/tcp` | Windows | decoded NV12 bridge between EXE and camera source DLL | localhost only |
 
@@ -247,10 +245,6 @@ Current input limits enforced by the control server:
 
 Stops the Android camera service.
 
-### `GET /preview.jpg`
-
-Returns the latest low-resolution JPEG preview frame.
-
 ## Security model
 
 PhoneCam is designed for a trusted local network.
@@ -261,7 +255,7 @@ The Android HTTP control server and H.264 TCP stream currently have:
 - no TLS/encryption
 - no access-control list
 
-Anyone who can reach the phone on ports 8080 or 8554 may be able to view the preview/stream or change camera settings.
+Anyone who can reach the phone on ports 8080 or 8554 may be able to access the video stream or change camera settings.
 
 **Do not expose these ports to the public internet.** Do not configure router port forwarding for PhoneCam. Use it only on a network you trust.
 
