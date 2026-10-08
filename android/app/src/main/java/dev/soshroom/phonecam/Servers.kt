@@ -102,7 +102,8 @@ class ControlServer(
             }
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
         }.apply {
-            addHeader("Cache-Control", "no-store")
+            addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
+            addHeader("Pragma", "no-cache")
         }
     }
 
@@ -167,18 +168,19 @@ class ControlServer(
 <html>
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PhoneCam</title>
+<title>PhoneCam ${BuildConfig.VERSION_NAME}</title>
 <style>
 body{font:15px system-ui,sans-serif;max-width:820px;margin:30px auto;padding:0 16px;background:#111;color:#eee}
+.header{display:flex;align-items:baseline;gap:10px}.version{color:#999;font-size:14px;font-weight:400}
 .card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:14px}
 img{width:100%;max-width:640px;background:#000;border-radius:8px}label{display:block;margin:9px 0 3px}
 input{width:180px;padding:7px;background:#111;color:#eee;border:1px solid #444;border-radius:5px}
 button{padding:8px 14px;margin:12px 6px 0 0}pre{white-space:pre-wrap}
 </style>
 </head><body>
-<h1>PhoneCam</h1>
+<div class="header"><h1>PhoneCam</h1><span class="version">v${BuildConfig.VERSION_NAME}</span></div>
 <div class="card"><img id="preview" alt="preview"></div>
-<div class="card"><pre id="status">loading...</pre></div>
+<div class="card"><pre id="statusText">loading status...</pre></div>
 <div class="card">
 <label>Camera ID</label><input id="cameraId">
 <label>Width</label><input id="width" type="number">
@@ -189,14 +191,18 @@ button{padding:8px 14px;margin:12px 6px 0 0}pre{white-space:pre-wrap}
 <br><button onclick="applySettings()">Apply</button><button onclick="stopCamera()">Stop camera</button>
 </div>
 <script>
+const statusEl=document.getElementById('statusText');
+const previewEl=document.getElementById('preview');
 let initialized=false;
 async function refresh(){
  try{
-  const r=await fetch('/api/status',{cache:'no-store'}); const s=await r.json();
-  status.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder: '+Number(s.encoderFps).toFixed(1)+' FPS, AE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
+  const r=await fetch('/api/status?t='+Date.now(),{cache:'no-store'});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const s=await r.json();
+  statusEl.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder: '+Number(s.encoderFps).toFixed(1)+' FPS, AE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
- }catch(e){status.textContent='offline';}
- preview.src='/preview.jpg?t='+Date.now();
+ }catch(e){statusEl.textContent='Status error: '+e.message;}
+ previewEl.src='/preview.jpg?t='+Date.now();
 }
 async function applySettings(){
  const body=new URLSearchParams(); ['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>body.set(k,document.getElementById(k).value));
