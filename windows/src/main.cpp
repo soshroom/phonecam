@@ -14,7 +14,7 @@
 #include "VirtualCamera.h"
 
 namespace {
-constexpr wchar_t APP_VERSION[] = L"0.1.3";
+constexpr wchar_t APP_VERSION[] = L"0.1.4";
 constexpr int IDC_ADDRESS = 1001;
 constexpr int IDC_CONNECT = 1002;
 constexpr int IDC_STATUS = 1003;
@@ -43,6 +43,10 @@ struct StreamStats {
     std::atomic<int> lastNal{-1};
     std::atomic<ULONGLONG> firstVclTick{0};
     std::atomic<ULONGLONG> firstDecodedTick{0};
+    std::atomic<ULONGLONG> lastVclTick{0};
+    std::atomic<ULONGLONG> lastDecodedTick{0};
+    std::atomic<ULONGLONG> maxVclGapMs{0};
+    std::atomic<ULONGLONG> maxDecodedGapMs{0};
 
     void Reset() {
         packets = 0;
@@ -56,6 +60,10 @@ struct StreamStats {
         lastNal = -1;
         firstVclTick = 0;
         firstDecodedTick = 0;
+        lastVclTick = 0;
+        lastDecodedTick = 0;
+        maxVclGapMs = 0;
+        maxDecodedGapMs = 0;
     }
 } gStats;
 
@@ -84,9 +92,23 @@ std::size_t startCodeLength(const std::vector<std::uint8_t>& data, std::size_t p
     return 0;
 }
 
-void markFirstTick(std::atomic<ULONGLONG>& tick) {
+void updateMax(std::atomic<ULONGLONG>& target, ULONGLONG value) {
+    auto current = target.load();
+    while (value > current && !target.compare_exchange_weak(current, value)) {
+    }
+}
+
+void recordFrameTick(
+    std::atomic<ULONGLONG>& firstTick,
+    std::atomic<ULONGLONG>& lastTick,
+    std::atomic<ULONGLONG>& maxGapMs) {
+    const ULONGLONG now = GetTickCount64();
     ULONGLONG expected = 0;
-    tick.compare_exchange_strong(expected, GetTickCount64());
+    firstTick.compare_exchange_strong(expected, now);
+    const ULONGLONG previous = lastTick.exchange(now);
+    if (previous != 0 && now > previous) {
+        updateMax(maxGapMs, now - previous);
+    }
 }
 
 double measuredRate(std::uint64_t count, ULONGLONG firstTick) {
@@ -102,7 +124,7 @@ void countNalType(int type) {
     if (type == 8) ++gStats.pps;
     if (type == 5) ++gStats.idr;
     if (type >= 1 && type <= 5) {
-        markFirstTick(gStats.firstVclTick);
+        recordFrameTick(gStats.firstVclTick, gStats.lastVclTick, gStats.maxVclGapMs);
         ++gStats.vcl;
     }
 }
@@ -188,7 +210,7 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
 
 HRESULT initializeDecoder(HWND hwnd) {
     return gDecoder.Initialize(1920, 1080, 30, [hwnd](std::vector<std::uint8_t> frame) {
-        markFirstTick(gStats.firstDecodedTick);
+        recordFrameTick(gStats.firstDecodedTick, gStats.lastDecodedTick, gStats.maxDecodedGapMs);
         ++gStats.decoded;
         gBridge.Publish(frame);
         PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
@@ -215,6 +237,8 @@ std::wstring streamStatusText(bool decodedNow) {
     out << std::fixed << std::setprecision(1);
     out << L"\r\nMeasured: input " << inputFps << L" FPS, decoded " << decodedFps << L" FPS";
     out << std::defaultfloat;
+    out << L"\r\nMax frame gap: input " << gStats.maxVclGapMs.load()
+        << L" ms, decoded " << gStats.maxDecodedGapMs.load() << L" ms";
     out << L"\r\nPackets: " << gStats.packets.load()
         << L", bytes: " << gStats.bytes.load();
     out << L"\r\nNAL: SPS=" << gStats.sps.load()
@@ -255,8 +279,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             16, 44, 270, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADDRESS)), nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
-        gStatus = CreateWindowW(L"STATIC", L"PhoneCam 0.1.3\r\nDisconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 430, 225, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+        gStatus = CreateWindowW(L"STATIC", L"PhoneCam 0.1.4\r\nDisconnected", WS_CHILD | WS_VISIBLE,
+            16, 88, 430, 245, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -296,7 +320,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 gCameraStartStage = gCamera.LastStage();
                 showCameraStartError();
             } else {
-                setStatus(L"PhoneCam 0.1.3\r\nVirtual camera started. Connecting to phone H.264 stream...");
+                setStatus(L"PhoneCam 0.1.4\r\nVirtual camera started. Connecting to phone H.264 stream...");
             }
 
             gReceiver.Start(
@@ -402,9 +426,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam 0.1.3",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam 0.1.4",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 480, 405,
+        CW_USEDEFAULT, CW_USEDEFAULT, 480, 425,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
