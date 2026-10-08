@@ -85,6 +85,8 @@ class ControlServer(
     private val clients: () -> Int,
     private val uptime: () -> Long,
     private val encoderFps: () -> Double,
+    private val encoderOutputBufferFps: () -> Double,
+    private val partialBuffers: () -> Long,
     private val fpsRange: () -> String,
     private val applySettings: (CameraConfig) -> Unit,
     private val stopCamera: () -> Unit,
@@ -128,6 +130,8 @@ class ControlServer(
             "height":${cfg.height},
             "fps":${cfg.fps},
             "encoderFps":${"%.2f".format(java.util.Locale.US, encoderFps())},
+            "encoderOutputBufferFps":${"%.2f".format(java.util.Locale.US, encoderOutputBufferFps())},
+            "partialBuffers":${partialBuffers()},
             "fpsRange":"${escape(fpsRange())}",
             "bitrate":${cfg.bitrate},
             "zoom":${cfg.zoom},
@@ -199,7 +203,7 @@ async function refresh(){
   const r=await fetch('/api/status?t='+Date.now(),{cache:'no-store'});
   if(!r.ok) throw new Error('HTTP '+r.status);
   const s=await r.json();
-  statusEl.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder: '+Number(s.encoderFps).toFixed(1)+' FPS, AE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
+  statusEl.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder frames: '+Number(s.encoderFps).toFixed(1)+' FPS\nEncoder buffers: '+Number(s.encoderOutputBufferFps).toFixed(1)+' FPS, partial buffers: '+s.partialBuffers+'\nAE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
  }catch(e){statusEl.textContent='Status error: '+e.message;}
  previewEl.src='/preview.jpg?t='+Date.now();
