@@ -258,7 +258,7 @@ class CameraService : Service() {
                     val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                         addTarget(previewSurface)
                         set(CaptureRequest.JPEG_QUALITY, 75.toByte())
-                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                     }.build()
                     session?.capture(request, null, cameraHandler)
                 }
