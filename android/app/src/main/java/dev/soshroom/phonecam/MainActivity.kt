@@ -47,7 +47,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "PhoneCam"
+            text = "PhoneCam ${BuildConfig.VERSION_NAME}"
             textSize = 24f
         })
 
