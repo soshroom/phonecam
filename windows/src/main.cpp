@@ -14,12 +14,13 @@
 #include "VirtualCamera.h"
 
 namespace {
-constexpr wchar_t APP_VERSION[] = L"0.1.2";
+constexpr wchar_t APP_VERSION[] = L"0.1.3";
 constexpr int IDC_ADDRESS = 1001;
 constexpr int IDC_CONNECT = 1002;
 constexpr int IDC_STATUS = 1003;
 constexpr UINT WM_CONNECTION_STATUS = WM_APP + 1;
 constexpr UINT WM_DECODE_ERROR = WM_APP + 2;
+constexpr UINT WM_NETWORK_STATE = WM_APP + 3;
 
 NetworkReceiver gReceiver;
 H264Decoder gDecoder;
@@ -28,6 +29,7 @@ VirtualCamera gCamera;
 HWND gStatus = nullptr;
 HRESULT gCameraStartHr = S_OK;
 std::wstring gCameraStartStage;
+std::atomic<std::uint64_t> gConnectionCount{0};
 
 struct StreamStats {
     std::atomic<std::uint64_t> packets{0};
@@ -184,11 +186,22 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
     countNalType(packet[0] & 0x1f);
 }
 
+HRESULT initializeDecoder(HWND hwnd) {
+    return gDecoder.Initialize(1920, 1080, 30, [hwnd](std::vector<std::uint8_t> frame) {
+        markFirstTick(gStats.firstDecodedTick);
+        ++gStats.decoded;
+        gBridge.Publish(frame);
+        PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
+    });
+}
+
 std::wstring streamStatusText(bool decodedNow) {
     const auto vclCount = gStats.vcl.load();
     const auto decodedCount = gStats.decoded.load();
     const double inputFps = measuredRate(vclCount, gStats.firstVclTick.load());
     const double decodedFps = measuredRate(decodedCount, gStats.firstDecodedTick.load());
+    const auto connections = gConnectionCount.load();
+    const auto reconnects = connections > 0 ? connections - 1 : 0;
 
     std::wostringstream out;
     out << L"PhoneCam " << APP_VERSION << L"\r\n";
@@ -198,6 +211,7 @@ std::wstring streamStatusText(bool decodedNow) {
         out << L"Connected to phone. Waiting for first decoded video frame...";
     }
     out << L"\r\nWindows pipeline: 1920x1080 @ 30 FPS";
+    out << L"\r\nReconnects: " << reconnects;
     out << std::fixed << std::setprecision(1);
     out << L"\r\nMeasured: input " << inputFps << L" FPS, decoded " << decodedFps << L" FPS";
     out << std::defaultfloat;
@@ -241,8 +255,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             16, 44, 270, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADDRESS)), nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
-        gStatus = CreateWindowW(L"STATIC", L"PhoneCam 0.1.2\r\nDisconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 430, 210, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+        gStatus = CreateWindowW(L"STATIC", L"PhoneCam 0.1.3\r\nDisconnected", WS_CHILD | WS_VISIBLE,
+            16, 88, 430, 225, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -259,6 +273,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             gReceiver.Stop();
             gDecoder.Reset();
             gStats.Reset();
+            gConnectionCount = 0;
             gCameraStartHr = S_OK;
             gCameraStartStage.clear();
 
@@ -267,12 +282,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
 
-            HRESULT hr = gDecoder.Initialize(1920, 1080, 30, [hwnd](std::vector<std::uint8_t> frame) {
-                markFirstTick(gStats.firstDecodedTick);
-                ++gStats.decoded;
-                gBridge.Publish(frame);
-                PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
-            });
+            HRESULT hr = initializeDecoder(hwnd);
             if (FAILED(hr)) {
                 wchar_t text[256]{};
                 wsprintfW(text, L"Cannot initialize H.264 decoder (0x%08X).", static_cast<unsigned>(hr));
@@ -286,21 +296,57 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 gCameraStartStage = gCamera.LastStage();
                 showCameraStartError();
             } else {
-                setStatus(L"PhoneCam 0.1.2\r\nVirtual camera started. Connecting to phone H.264 stream...");
+                setStatus(L"PhoneCam 0.1.3\r\nVirtual camera started. Connecting to phone H.264 stream...");
             }
 
-            gReceiver.Start(host, port, [hwnd](std::vector<std::uint8_t> packet) {
-                inspectPacket(packet);
-                const HRESULT decodeHr = gDecoder.Push(packet);
-                if (FAILED(decodeHr) && decodeHr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
-                    PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(decodeHr), 0);
-                } else {
-                    PostMessageW(hwnd, WM_CONNECTION_STATUS, 1, 0);
-                }
-            });
+            gReceiver.Start(
+                host,
+                port,
+                [hwnd](std::vector<std::uint8_t> packet) {
+                    inspectPacket(packet);
+                    const HRESULT decodeHr = gDecoder.Push(packet);
+                    if (FAILED(decodeHr) && decodeHr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                        PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(decodeHr), 0);
+                    } else {
+                        PostMessageW(hwnd, WM_CONNECTION_STATUS, 1, 0);
+                    }
+                },
+                [hwnd](bool connected) {
+                    if (!connected) {
+                        PostMessageW(hwnd, WM_NETWORK_STATE, 0, 0);
+                        return;
+                    }
+
+                    const auto connectionNumber = gConnectionCount.fetch_add(1) + 1;
+                    if (connectionNumber > 1) {
+                        gStats.Reset();
+                        gDecoder.Reset();
+                        const HRESULT hr = initializeDecoder(hwnd);
+                        if (FAILED(hr)) {
+                            PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(hr), 0);
+                            return;
+                        }
+                    }
+                    PostMessageW(hwnd, WM_NETWORK_STATE, 1, static_cast<LPARAM>(connectionNumber));
+                });
             return 0;
         }
         break;
+    case WM_NETWORK_STATE:
+        if (wParam == 0) {
+            std::wostringstream out;
+            out << L"PhoneCam " << APP_VERSION
+                << L"\r\nPhone disconnected or stream stalled. Reconnecting automatically..."
+                << L"\r\nReconnects so far: " << (gConnectionCount.load() > 0 ? gConnectionCount.load() - 1 : 0);
+            setStatus(out.str());
+        } else {
+            std::wostringstream out;
+            out << L"PhoneCam " << APP_VERSION
+                << L"\r\nTCP connected. Waiting for SPS/PPS and keyframe..."
+                << L"\r\nConnection #" << static_cast<std::uint64_t>(lParam);
+            setStatus(out.str());
+        }
+        return 0;
     case WM_CONNECTION_STATUS:
         if (FAILED(gCameraStartHr)) {
             showCameraStartError();
@@ -356,9 +402,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam 0.1.2",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam 0.1.3",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 480, 390,
+        CW_USEDEFAULT, CW_USEDEFAULT, 480, 405,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
