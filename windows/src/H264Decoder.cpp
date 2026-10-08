@@ -170,7 +170,6 @@ std::vector<std::uint8_t> PackTightNv12(
     const std::size_t uvOffset = stride * storageHeight;
     const std::size_t required = uvOffset + stride * (height / 2);
     if (stride < width || required > currentLength) {
-        // If Media Foundation already returned tightly packed NV12, use it directly.
         return std::vector<std::uint8_t>(data, data + expected);
     }
 
@@ -234,6 +233,14 @@ HRESULT H264Decoder::Initialize(std::uint32_t width, std::uint32_t height, std::
     for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
     CoTaskMemFree(activates);
     if (FAILED(hr)) return hr;
+
+    // This is a live camera path. Tell the MFT not to buffer/reorder frames for
+    // playback-style quality. MF_LOW_LATENCY maps to the decoder low-latency
+    // codec property on the inbox H.264 decoder.
+    ComPtr<IMFAttributes> decoderAttributes;
+    if (SUCCEEDED(decoder_->GetAttributes(&decoderAttributes)) && decoderAttributes) {
+        decoderAttributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+    }
 
     ComPtr<IMFMediaType> inputType;
     hr = MFCreateMediaType(&inputType);
@@ -376,6 +383,9 @@ HRESULT H264Decoder::Drain() {
             for (DWORD index = 0; SUCCEEDED(decoder_->GetOutputAvailableType(0, index, &newType)); ++index) {
                 GUID subtype{};
                 if (SUCCEEDED(newType->GetGUID(MF_MT_SUBTYPE, &subtype)) && subtype == MFVideoFormat_NV12) {
+                    // Some decoders return a generic output type on the format-change
+                    // notification. Keep the live stream rate explicit.
+                    MFSetAttributeRatio(newType.Get(), MF_MT_FRAME_RATE, fps_, 1);
                     hr = decoder_->SetOutputType(0, newType.Get(), 0);
                     if (FAILED(hr)) return hr;
                     typeSet = true;
