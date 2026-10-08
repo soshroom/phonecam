@@ -149,6 +149,7 @@ class CameraService : Service() {
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, cfg.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
         }
@@ -260,9 +261,6 @@ class CameraService : Service() {
 
                             val isCodecConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                             if (isCodecConfig && bytes.isNotEmpty()) {
-                                // Some hardware AVC encoders expose SPS/PPS only through a
-                                // BUFFER_FLAG_CODEC_CONFIG output buffer rather than csd-0/csd-1.
-                                // Cache it so clients connecting after encoder startup receive it.
                                 updateCodecConfig(listOf(bytes))
                                 h264Server?.broadcast(bytes)
                             } else {
