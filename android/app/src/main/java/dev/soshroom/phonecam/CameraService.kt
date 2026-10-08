@@ -160,7 +160,11 @@ class CameraService : Service() {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, cfg.fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            // The stream runs over reliable TCP and a fresh sync frame is requested whenever
+            // a client connects. A very short GOP created a large encoder/network/decoder burst
+            // every two seconds, which showed up as a periodic hitch in the Windows camera.
+            // Keep only a slow fallback IDR for devices that ignore explicit sync requests.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 30)
             setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
@@ -258,9 +262,10 @@ class CameraService : Service() {
     private fun emitAccessUnit(bytes: ByteArray, flags: Int) {
         if (bytes.isEmpty()) return
         updateEncoderFps()
-        if ((flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-            codecConfig.forEach { h264Server?.broadcast(it) }
-        }
+        // Codec config is cached by H264Server and sent once to newly connected clients.
+        // KEY_PREPEND_HEADER_TO_SYNC_FRAMES also lets the encoder attach SPS/PPS to sync
+        // frames when required, so re-broadcasting cached config before every IDR only
+        // creates an unnecessary traffic/decoder burst.
         h264Server?.broadcast(bytes)
     }
 
