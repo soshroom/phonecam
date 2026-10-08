@@ -39,3 +39,4 @@ jobs:
             gh release create $env:TAG --target "${{ github.sha }}" --title "PhoneCam build ${{ github.run_number }}" --notes "Automated build from commit ${{ github.sha }}"
           }
           gh release upload $env:TAG PhoneCam-windows-x64.exe PhoneCamSource-x64.dll PhoneCamSetup-x64.exe --clobber
+          gh release edit $env:TAG --latest
