@@ -13,6 +13,7 @@
 #include "VirtualCamera.h"
 
 namespace {
+constexpr wchar_t APP_VERSION[] = L"0.1.1";
 constexpr int IDC_ADDRESS = 1001;
 constexpr int IDC_CONNECT = 1002;
 constexpr int IDC_STATUS = 1003;
@@ -165,6 +166,7 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
 
 std::wstring streamStatusText(bool decodedNow) {
     std::wostringstream out;
+    out << L"PhoneCam " << APP_VERSION << L"\r\n";
     if (decodedNow || gStats.decoded.load() > 0) {
         out << L"Connected. H.264 decoded; virtual camera is receiving frames.";
     } else {
@@ -211,8 +213,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             16, 44, 270, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADDRESS)), nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             298, 44, 90, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), nullptr, nullptr);
-        gStatus = CreateWindowW(L"STATIC", L"Disconnected", WS_CHILD | WS_VISIBLE,
-            16, 88, 420, 170, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
+        gStatus = CreateWindowW(L"STATIC", L"PhoneCam 0.1.1\r\nDisconnected", WS_CHILD | WS_VISIBLE,
+            16, 88, 420, 190, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -255,7 +257,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 gCameraStartStage = gCamera.LastStage();
                 showCameraStartError();
             } else {
-                setStatus(L"Virtual camera started. Connecting to phone H.264 stream...");
+                setStatus(L"PhoneCam 0.1.1\r\nVirtual camera started. Connecting to phone H.264 stream...");
             }
 
             gReceiver.Start(host, port, [hwnd](std::vector<std::uint8_t> packet) {
@@ -285,7 +287,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         std::wostringstream out;
-        out << L"H.264 decode error: 0x" << std::hex << static_cast<unsigned>(wParam) << std::dec;
+        out << L"PhoneCam " << APP_VERSION;
+        out << L"\r\nH.264 decode error: 0x" << std::hex << static_cast<unsigned>(wParam) << std::dec;
         out << L"\r\nPackets: " << gStats.packets.load();
         out << L" SPS=" << gStats.sps.load()
             << L" PPS=" << gStats.pps.load()
@@ -324,9 +327,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam 0.1.1",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 470, 340,
+        CW_USEDEFAULT, CW_USEDEFAULT, 470, 360,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         MFShutdown();
