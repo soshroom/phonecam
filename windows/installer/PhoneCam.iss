@@ -1,7 +1,7 @@
 [Setup]
 AppId={{D2AD37A2-4579-4A2D-8E23-A7D9A67359B2}
 AppName=PhoneCam
-AppVersion=0.2.1
+AppVersion=0.1.3
 AppPublisher=soshroom
 DefaultDirName={autopf}\PhoneCam
 DefaultGroupName=PhoneCam
