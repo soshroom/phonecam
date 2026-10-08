@@ -7,22 +7,18 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.*
-import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.*
 import android.util.Range
-import android.util.Size
 import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 class CameraService : Service() {
     private lateinit var manager: CameraManager
@@ -33,12 +29,10 @@ class CameraService : Service() {
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
     private var encoderThread: Thread? = null
-    private var imageReader: ImageReader? = null
     private var h264Server: H264Server? = null
     private var controlServer: ControlServer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentConfig: CameraConfig? = null
-    private val latestJpeg = AtomicReference<ByteArray?>(null)
     private val draining = AtomicBoolean(false)
     private var repeatingBuilder: CaptureRequest.Builder? = null
     private var sensorRect: Rect? = null
@@ -98,7 +92,6 @@ class CameraService : Service() {
         controlServer = ControlServer(
             context = this,
             port = cfg.httpPort,
-            snapshot = latestJpeg,
             clients = { h264Server?.clientCount() ?: 0 },
             uptime = { SystemClock.elapsedRealtime() - startedAt },
             encoderFps = { encoderFps },
@@ -142,7 +135,6 @@ class CameraService : Service() {
         val characteristics = manager.getCameraCharacteristics(cameraId)
         sensorRect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         setupEncoder(currentConfig!!)
-        setupPreviewReader(currentConfig!!)
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
@@ -184,25 +176,10 @@ class CameraService : Service() {
         encoderThread = Thread({ drainEncoder() }, "phonecam-encoder").also { it.start() }
     }
 
-    private fun setupPreviewReader(cfg: CameraConfig) {
-        val preview = if (cfg.width >= 1280) Size(640, 360) else Size(480, 270)
-        imageReader = ImageReader.newInstance(preview.width, preview.height, ImageFormat.JPEG, 2).apply {
-            setOnImageAvailableListener({ reader ->
-                reader.acquireLatestImage()?.use { image ->
-                    val buffer = image.planes[0].buffer
-                    val bytes = ByteArray(buffer.remaining())
-                    buffer.get(bytes)
-                    latestJpeg.set(bytes)
-                }
-            }, cameraHandler)
-        }
-    }
-
     private fun createSession(cfg: CameraConfig) {
         val device = camera ?: return
         val videoSurface = encoderSurface ?: return
-        val previewSurface = imageReader?.surface ?: return
-        device.createCaptureSession(listOf(videoSurface, previewSurface), object : CameraCaptureSession.StateCallback() {
+        device.createCaptureSession(listOf(videoSurface), object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(captureSession: CameraCaptureSession) {
                 session = captureSession
                 repeatingBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
@@ -211,7 +188,6 @@ class CameraService : Service() {
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 }
                 rebuildRepeating(cfg)
-                schedulePreview(device, previewSurface)
             }
             override fun onConfigureFailed(captureSession: CameraCaptureSession) = Unit
         }, cameraHandler)
@@ -248,23 +224,6 @@ class CameraService : Service() {
             builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(left, top, left + w, top + h))
         }
         runCatching { captureSession.setRepeatingRequest(builder.build(), null, cameraHandler) }
-    }
-
-    private fun schedulePreview(device: CameraDevice, previewSurface: Surface) {
-        cameraHandler.post(object : Runnable {
-            override fun run() {
-                if (!running || session == null) return
-                runCatching {
-                    val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                        addTarget(previewSurface)
-                        set(CaptureRequest.JPEG_QUALITY, 75.toByte())
-                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                    }.build()
-                    session?.capture(request, null, cameraHandler)
-                }
-                cameraHandler.postDelayed(this, 1000)
-            }
-        })
     }
 
     private fun updateCodecConfig(config: List<ByteArray>) {
@@ -388,7 +347,6 @@ class CameraService : Service() {
     private fun closeCameraPipeline() {
         session?.close(); session = null
         camera?.close(); camera = null
-        imageReader?.close(); imageReader = null
         draining.set(false)
         encoderThread?.interrupt(); encoderThread = null
         encoder?.let { runCatching { it.stop() }; runCatching { it.release() } }
