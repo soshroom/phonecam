@@ -43,6 +43,10 @@ class CameraService : Service() {
     private var sensorRect: Rect? = null
     private var startedAt = 0L
     @Volatile private var codecConfig: List<ByteArray> = emptyList()
+    @Volatile private var selectedFpsRange = "unknown"
+    @Volatile private var encoderFps = 0.0
+    private var encoderFrameCount = 0L
+    private var encoderFpsStartedAt = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -92,6 +96,8 @@ class CameraService : Service() {
             snapshot = latestJpeg,
             clients = { h264Server?.clientCount() ?: 0 },
             uptime = { SystemClock.elapsedRealtime() - startedAt },
+            encoderFps = { encoderFps },
+            fpsRange = { selectedFpsRange },
             applySettings = { applyConfig(it) },
             stopCamera = { stopEverything() },
         ).also { it.start(5000, false) }
@@ -106,7 +112,7 @@ class CameraService : Service() {
             return
         }
         val old = currentConfig
-        if (old == null || old.cameraId != next.cameraId || old.width != next.width || old.height != next.height) {
+        if (old == null || old.cameraId != next.cameraId || old.width != next.width || old.height != next.height || old.fps != next.fps) {
             restartCamera(next)
             return
         }
@@ -144,14 +150,19 @@ class CameraService : Service() {
     private fun setupEncoder(cfg: CameraConfig) {
         codecConfig = emptyList()
         h264Server?.setCodecConfig(emptyList())
+        encoderFrameCount = 0
+        encoderFps = 0.0
+        encoderFpsStartedAt = SystemClock.elapsedRealtime()
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, cfg.width, cfg.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, cfg.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, cfg.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, cfg.fps)
         }
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { codec ->
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -186,6 +197,7 @@ class CameraService : Service() {
                 repeatingBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                     addTarget(videoSurface)
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 }
                 rebuildRepeating(cfg)
                 schedulePreview(device, previewSurface)
@@ -194,10 +206,28 @@ class CameraService : Service() {
         }, cameraHandler)
     }
 
+    private fun chooseFpsRange(cameraId: String, requestedFps: Int): Range<Int> {
+        val ranges = manager.getCameraCharacteristics(cameraId)
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.toList()
+            .orEmpty()
+
+        val exact = ranges.firstOrNull { it.lower == requestedFps && it.upper == requestedFps }
+        if (exact != null) return exact
+
+        return ranges
+            .filter { requestedFps in it.lower..it.upper }
+            .minWithOrNull(compareBy<Range<Int>>({ it.upper - it.lower }, { -it.lower }))
+            ?: ranges.maxByOrNull { it.upper }
+            ?: Range(requestedFps, requestedFps)
+    }
+
     private fun rebuildRepeating(cfg: CameraConfig) {
         val builder = repeatingBuilder ?: return
         val captureSession = session ?: return
-        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(cfg.fps, cfg.fps))
+        val range = chooseFpsRange(currentConfig?.cameraId ?: cfg.cameraId, cfg.fps)
+        selectedFpsRange = "${range.lower}-${range.upper}"
+        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
         sensorRect?.let { active ->
             val zoom = cfg.zoom.coerceAtLeast(1f)
             val w = (active.width() / zoom).toInt()
@@ -233,6 +263,17 @@ class CameraService : Service() {
         h264Server?.setCodecConfig(codecConfig)
     }
 
+    private fun updateEncoderFps() {
+        ++encoderFrameCount
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - encoderFpsStartedAt
+        if (elapsed >= 2000) {
+            encoderFps = encoderFrameCount * 1000.0 / elapsed
+            encoderFrameCount = 0
+            encoderFpsStartedAt = now
+        }
+    }
+
     private fun drainEncoder() {
         val info = MediaCodec.BufferInfo()
         while (draining.get()) {
@@ -264,6 +305,7 @@ class CameraService : Service() {
                                 updateCodecConfig(listOf(bytes))
                                 h264Server?.broadcast(bytes)
                             } else {
+                                if (bytes.isNotEmpty()) updateEncoderFps()
                                 if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
                                     codecConfig.forEach { h264Server?.broadcast(it) }
                                 }
@@ -298,6 +340,8 @@ class CameraService : Service() {
         repeatingBuilder = null
         codecConfig = emptyList()
         h264Server?.setCodecConfig(emptyList())
+        encoderFps = 0.0
+        selectedFpsRange = "unknown"
     }
 
     private fun stopEverything() {
