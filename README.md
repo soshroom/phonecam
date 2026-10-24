@@ -25,7 +25,7 @@ The project is intentionally local-first. There is no cloud relay, account, audi
 - a current Windows 11 Media Foundation runtime
 - administrator rights for installation, because the installer registers the Media Foundation camera source
 
-For the current Windows pipeline, use **1920x1080 at 30 FPS** on Android. The Android app exposes other resolutions and frame rates for testing, but the Windows virtual camera source currently advertises a fixed 1920x1080 NV12 stream at 30 FPS.
+Android can stream 1280x720, 1920x1080, or 2560x1440. Windows scales decoded frames to the virtual camera's fixed 1920x1080 NV12 output at 30 FPS. Available input modes still depend on the phone's camera and encoder.
 
 ## Download and quick start
 
@@ -183,11 +183,11 @@ Each packet is encoded as:
 +-------------------------------+
 | 4-byte big-endian payload len |
 +-------------------------------+
-| N bytes of H.264 payload      |
+| N bytes of payload            |
 +-------------------------------+
 ```
 
-Codec configuration buffers travel through the same framing protocol as encoded video access units.
+On connection and when the Android camera settings change, a 16-byte `PCAM` payload gives the input width, height, and FPS as three big-endian 32-bit integers. Codec configuration buffers and encoded video access units use the same framing protocol.
 
 The Windows receiver enables TCP keepalive and `TCP_NODELAY`, detects stalled/disconnected streams and reconnects automatically.
 
@@ -266,7 +266,7 @@ The Windows decoded-frame bridge is safer by design because it listens only on `
 - Android 12+ only
 - Windows 11 x64 only
 - video only, no microphone/audio support
-- Windows virtual camera currently fixed to 1920x1080 at 30 FPS
+- Windows virtual camera output is fixed to 1920x1080 at 30 FPS; other input resolutions are scaled
 - no automatic device discovery, the phone address is entered manually
 - no authentication or encrypted transport
 - no production code signing yet
@@ -393,7 +393,7 @@ Close and reopen the application that should use the webcam after PhoneCam has s
 
 ### Video connects but decoding does not start
 
-Start with Android configured for 1920x1080, 30 FPS and 5 Mbps. The Windows pipeline is currently built around that exact output mode.
+Start with Android configured for 1920x1080, 30 FPS and 5 Mbps. For 720p or 1440p input, update both the Android app and Windows client so the stream includes its dimensions.
 
 The Windows status panel shows packet counts, SPS/PPS/IDR information, measured input FPS and decoded-frame counts, which can help distinguish a network problem from a decoder problem.
 

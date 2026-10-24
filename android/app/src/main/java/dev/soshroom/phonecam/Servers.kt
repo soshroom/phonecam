@@ -19,6 +19,7 @@ class H264Server(
     private val clients = ConcurrentHashMap.newKeySet<Socket>()
     private val executor = Executors.newCachedThreadPool()
     @Volatile private var codecConfig: List<ByteArray> = emptyList()
+    @Volatile private var videoFormat = ByteArray(0)
 
     fun start() {
         server = ServerSocket(port)
@@ -29,8 +30,9 @@ class H264Server(
                         tcpNoDelay = true
                         keepAlive = true
                     }
-                    clients.add(socket)
+                    sendPacket(socket, videoFormat)
                     codecConfig.forEach { sendPacket(socket, it) }
+                    clients.add(socket)
                     onClientConnected?.invoke()
                 } catch (_: Exception) {
                     break
@@ -41,6 +43,13 @@ class H264Server(
 
     fun setCodecConfig(config: List<ByteArray>) {
         codecConfig = config.map { it.copyOf() }
+    }
+
+    fun setVideoFormat(width: Int, height: Int, fps: Int) {
+        val data = java.nio.ByteBuffer.allocate(16).put("PCAM".toByteArray(Charsets.US_ASCII))
+            .putInt(width).putInt(height).putInt(fps).array()
+        videoFormat = data
+        broadcast(data)
     }
 
     private fun sendPacket(socket: Socket, data: ByteArray) {

@@ -132,6 +132,8 @@ class CameraService : Service() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val cameraId = chooseCamera(cfg.cameraId)
         currentConfig = cfg.copy(cameraId = cameraId).also { it.save(this) }
+        h264Server?.setCodecConfig(emptyList())
+        h264Server?.setVideoFormat(cfg.width, cfg.height, cfg.fps)
         val characteristics = manager.getCameraCharacteristics(cameraId)
         sensorRect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         setupEncoder(currentConfig!!)
