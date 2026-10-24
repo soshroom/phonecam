@@ -3,6 +3,7 @@
 #include <mferror.h>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -30,6 +31,9 @@ HWND gStatus = nullptr;
 HRESULT gCameraStartHr = S_OK;
 std::wstring gCameraStartStage;
 std::atomic<std::uint64_t> gConnectionCount{0};
+std::atomic<std::uint32_t> gInputWidth{1920};
+std::atomic<std::uint32_t> gInputHeight{1080};
+std::atomic<std::uint32_t> gInputFps{30};
 
 struct StreamStats {
     std::atomic<std::uint64_t> packets{0};
@@ -208,13 +212,60 @@ void inspectPacket(const std::vector<std::uint8_t>& packet) {
     countNalType(packet[0] & 0x1f);
 }
 
-HRESULT initializeDecoder(HWND hwnd) {
-    return gDecoder.Initialize(1920, 1080, 30, [hwnd](std::vector<std::uint8_t> frame) {
+constexpr std::size_t scaledCoordinate(std::size_t output, std::size_t inputSize, std::size_t outputSize) {
+    return output * inputSize / outputSize;
+}
+static_assert(scaledCoordinate(1919, 1280, 1920) == 1279);
+static_assert(scaledCoordinate(959, 1280 / 2, 1920 / 2) == 639);
+static_assert(scaledCoordinate(1919, 2560, 1920) == 2558);
+
+std::vector<std::uint8_t> resizeNv12(const std::vector<std::uint8_t>& frame, std::uint32_t width, std::uint32_t height) {
+    if (frame.size() != static_cast<std::size_t>(width) * height * 3 / 2) return {};
+    if (width == 1920 && height == 1080) return frame;
+    std::vector<std::uint8_t> scaled(1920 * 1080 * 3 / 2);
+    for (std::uint32_t y = 0; y < 1080; ++y) {
+        const auto sourceY = scaledCoordinate(y, height, 1080);
+        for (std::uint32_t x = 0; x < 1920; ++x) {
+            scaled[y * 1920 + x] = frame[sourceY * width + scaledCoordinate(x, width, 1920)];
+        }
+    }
+    const auto sourceUv = static_cast<std::size_t>(width) * height;
+    const auto outputUv = 1920 * 1080;
+    for (std::uint32_t y = 0; y < 540; ++y) {
+        const auto sourceY = scaledCoordinate(y, height / 2, 540);
+        for (std::uint32_t x = 0; x < 960; ++x) {
+            const auto sourceX = scaledCoordinate(x, width / 2, 960);
+            const auto src = sourceUv + sourceY * width + sourceX * 2;
+            const auto dst = outputUv + y * 1920 + x * 2;
+            scaled[dst] = frame[src];
+            scaled[dst + 1] = frame[src + 1];
+        }
+    }
+    return scaled;
+}
+
+HRESULT initializeDecoder(HWND hwnd, std::uint32_t width = 1920, std::uint32_t height = 1080, std::uint32_t fps = 30) {
+    return gDecoder.Initialize(width, height, fps, [hwnd, width, height](std::vector<std::uint8_t> frame) {
         recordFrameTick(gStats.firstDecodedTick, gStats.lastDecodedTick, gStats.maxDecodedGapMs);
         ++gStats.decoded;
-        gBridge.Publish(frame);
+        gBridge.Publish(resizeNv12(frame, width, height));
         PostMessageW(hwnd, WM_CONNECTION_STATUS, 2, 0);
     });
+}
+
+bool readVideoFormat(const std::vector<std::uint8_t>& packet, std::uint32_t& width, std::uint32_t& height, std::uint32_t& fps) {
+    if (packet.size() != 16 || std::memcmp(packet.data(), "PCAM", 4) != 0) return false;
+    auto read = [&packet](std::size_t offset) {
+        return (static_cast<std::uint32_t>(packet[offset]) << 24) |
+            (static_cast<std::uint32_t>(packet[offset + 1]) << 16) |
+            (static_cast<std::uint32_t>(packet[offset + 2]) << 8) |
+            static_cast<std::uint32_t>(packet[offset + 3]);
+    };
+    width = read(4);
+    height = read(8);
+    fps = read(12);
+    return width >= 2 && height >= 2 && width % 2 == 0 && height % 2 == 0 &&
+        width <= 3840 && height <= 2160 && fps >= 5 && fps <= 30;
 }
 
 std::wstring streamStatusText(bool decodedNow) {
@@ -232,7 +283,8 @@ std::wstring streamStatusText(bool decodedNow) {
     } else {
         out << L"Connected to phone. Waiting for first decoded video frame...";
     }
-    out << L"\r\nWindows pipeline: 1920x1080 @ 30 FPS";
+    out << L"\r\nPhone: " << gInputWidth.load() << L"x" << gInputHeight.load()
+        << L" @ " << gInputFps.load() << L" FPS; virtual camera: 1920x1080 @ 30 FPS";
     out << L"\r\nReconnects: " << reconnects;
     out << std::fixed << std::setprecision(1);
     out << L"\r\nMeasured: input " << inputFps << L" FPS, decoded " << decodedFps << L" FPS";
@@ -298,6 +350,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             gDecoder.Reset();
             gStats.Reset();
             gConnectionCount = 0;
+            gInputWidth = 1920;
+            gInputHeight = 1080;
+            gInputFps = 30;
             gCameraStartHr = S_OK;
             gCameraStartStage.clear();
 
@@ -327,6 +382,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 host,
                 port,
                 [hwnd](std::vector<std::uint8_t> packet) {
+                    std::uint32_t width = 0, height = 0, fps = 0;
+                    if (readVideoFormat(packet, width, height, fps)) {
+                        gInputWidth = width;
+                        gInputHeight = height;
+                        gInputFps = fps;
+                        const HRESULT hr = initializeDecoder(hwnd, width, height, fps);
+                        if (FAILED(hr)) PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(hr), 0);
+                        return;
+                    }
                     inspectPacket(packet);
                     const HRESULT decodeHr = gDecoder.Push(packet);
                     if (FAILED(decodeHr) && decodeHr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -345,7 +409,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (connectionNumber > 1) {
                         gStats.Reset();
                         gDecoder.Reset();
-                        const HRESULT hr = initializeDecoder(hwnd);
+                        const HRESULT hr = initializeDecoder(hwnd, gInputWidth.load(), gInputHeight.load(), gInputFps.load());
                         if (FAILED(hr)) {
                             PostMessageW(hwnd, WM_DECODE_ERROR, static_cast<WPARAM>(hr), 0);
                             return;

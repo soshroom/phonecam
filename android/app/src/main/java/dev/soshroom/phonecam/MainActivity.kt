@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         select(bitrateSpinner, "${config.bitrate / 1_000_000} Mbps")
 
         val start = Button(this).apply {
-            text = "Start camera"
+            text = "Start PhoneCam"
             setOnClickListener {
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                     cameraPermission.launch(Manifest.permission.CAMERA)
@@ -113,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(apply)
 
         val stop = Button(this).apply {
-            text = "Stop camera"
+            text = "Stop PhoneCam"
             setOnClickListener {
                 startService(Intent(this@MainActivity, CameraService::class.java).setAction(CameraService.ACTION_STOP))
                 updateStatus(false)
@@ -123,6 +123,17 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(root)
         updateStatus(CameraService.running)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        CameraService.onStateChanged = { updateStatus(CameraService.running) }
+        updateStatus(CameraService.running)
+    }
+
+    override fun onStop() {
+        CameraService.onStateChanged = null
+        super.onStop()
     }
 
     private fun addSpinner(root: LinearLayout, label: String, values: List<String>): Spinner {
@@ -156,7 +167,7 @@ class MainActivity : AppCompatActivity() {
         val cfg = CameraConfig.load(this)
         val ip = lanAddress() ?: "PHONE_IP"
         status.text = if (isRunning) {
-            "Running\nWeb: http://$ip:${cfg.httpPort}\nStream: $ip:${cfg.streamPort}"
+            "${if (CameraService.streaming) "Streaming" else "Waiting for client"}\nWeb: http://$ip:${cfg.httpPort}\nStream: $ip:${cfg.streamPort}"
         } else {
             "Stopped"
         }

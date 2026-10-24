@@ -13,27 +13,45 @@ import java.util.concurrent.Executors
 
 class H264Server(
     private val port: Int,
-    private val onClientConnected: (() -> Unit)? = null,
+    private val onClientChanged: ((Boolean) -> Unit)? = null,
 ) {
     private var server: ServerSocket? = null
     private val clients = ConcurrentHashMap.newKeySet<Socket>()
     private val executor = Executors.newCachedThreadPool()
     @Volatile private var codecConfig: List<ByteArray> = emptyList()
+    @Volatile private var videoFormat = ByteArray(0)
+    @Volatile private var stopped = false
 
     fun start() {
         server = ServerSocket(port)
         executor.execute {
-            while (!server!!.isClosed) {
+            while (!stopped) {
+                val socket = try { server!!.accept() } catch (_: Exception) { break }
                 try {
-                    val socket = server!!.accept().apply {
-                        tcpNoDelay = true
-                        keepAlive = true
+                    if (stopped) {
+                        socket.close()
+                        break
                     }
-                    clients.add(socket)
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    sendPacket(socket, videoFormat)
                     codecConfig.forEach { sendPacket(socket, it) }
-                    onClientConnected?.invoke()
+                    clients.add(socket)
+                    if (stopped) {
+                        removeClient(socket)
+                        break
+                    }
+                    onClientChanged?.invoke(true)
+                    executor.execute {
+                        try {
+                            while (socket.getInputStream().read() != -1) { }
+                        } catch (_: Exception) {
+                        } finally {
+                            removeClient(socket)
+                        }
+                    }
                 } catch (_: Exception) {
-                    break
+                    removeClient(socket)
                 }
             }
         }
@@ -41,6 +59,13 @@ class H264Server(
 
     fun setCodecConfig(config: List<ByteArray>) {
         codecConfig = config.map { it.copyOf() }
+    }
+
+    fun setVideoFormat(width: Int, height: Int, fps: Int) {
+        val data = java.nio.ByteBuffer.allocate(16).put("PCAM".toByteArray(Charsets.US_ASCII))
+            .putInt(width).putInt(height).putInt(fps).array()
+        videoFormat = data
+        broadcast(data)
     }
 
     private fun sendPacket(socket: Socket, data: ByteArray) {
@@ -53,14 +78,19 @@ class H264Server(
         }
     }
 
+    private fun removeClient(socket: Socket) {
+        val removed = clients.remove(socket)
+        runCatching { socket.close() }
+        if (removed) onClientChanged?.invoke(false)
+    }
+
     fun broadcast(data: ByteArray) {
         if (data.isEmpty()) return
         clients.toList().forEach { socket ->
             try {
                 sendPacket(socket, data)
             } catch (_: Exception) {
-                clients.remove(socket)
-                runCatching { socket.close() }
+                removeClient(socket)
             }
         }
     }
@@ -68,9 +98,11 @@ class H264Server(
     fun clientCount(): Int = clients.size
 
     fun stop() {
+        stopped = true
         runCatching { server?.close() }
-        clients.forEach { runCatching { it.close() } }
+        val connected = clients.toList()
         clients.clear()
+        connected.forEach { runCatching { it.close() } }
         codecConfig = emptyList()
         executor.shutdownNow()
     }
@@ -85,6 +117,7 @@ class ControlServer(
     private val encoderOutputBufferFps: () -> Double,
     private val partialBuffers: () -> Long,
     private val fpsRange: () -> String,
+    private val streaming: () -> Boolean,
     private val applySettings: (CameraConfig) -> Unit,
     private val stopCamera: () -> Unit,
 ) : NanoHTTPD(port) {
@@ -114,6 +147,7 @@ class ControlServer(
         val percent = if (level >= 0) level * 100 / scale.coerceAtLeast(1) else -1
         val json = """{
             "running":true,
+            "streaming":${streaming()},
             "version":"${escape(BuildConfig.VERSION_NAME)}",
             "cameraId":"${escape(cfg.cameraId)}",
             "width":${cfg.width},
@@ -181,7 +215,7 @@ button{padding:8px 14px;margin:12px 6px 0 0}pre{white-space:pre-wrap}
 <label>FPS</label><input id="fps" type="number" min="5" max="30">
 <label>Bitrate</label><input id="bitrate" type="number">
 <label>Zoom</label><input id="zoom" type="number" min="1" max="4" step="0.1">
-<br><button onclick="applySettings()">Apply</button><button onclick="stopCamera()">Stop camera</button>
+<br><button onclick="applySettings()">Apply</button><button onclick="stopCamera()">Stop PhoneCam</button>
 </div>
 <script>
 const statusEl=document.getElementById('statusText');
@@ -191,7 +225,7 @@ async function refresh(){
   const r=await fetch('/api/status?t='+Date.now(),{cache:'no-store'});
   if(!r.ok) throw new Error('HTTP '+r.status);
   const s=await r.json();
-  statusEl.textContent='PhoneCam '+s.version+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder frames: '+Number(s.encoderFps).toFixed(1)+' FPS\nEncoder buffers: '+Number(s.encoderOutputBufferFps).toFixed(1)+' FPS, partial buffers: '+s.partialBuffers+'\nAE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
+  statusEl.textContent='PhoneCam '+s.version+'\n'+(s.streaming?'Streaming':'Waiting for client')+'\n'+s.width+'x'+s.height+' @ '+s.fps+' FPS requested\nEncoder frames: '+Number(s.encoderFps).toFixed(1)+' FPS\nEncoder buffers: '+Number(s.encoderOutputBufferFps).toFixed(1)+' FPS, partial buffers: '+s.partialBuffers+'\nAE range '+s.fpsRange+'\n'+(s.bitrate/1000000).toFixed(1)+' Mbps, zoom '+s.zoom+'x\nWindows clients: '+s.clients+'\nUptime: '+s.uptimeSeconds+'s\nBattery: '+s.batteryPercent+'%\nBattery temp: '+s.batteryTemperatureC+' C';
   if(!initialized){['cameraId','width','height','fps','bitrate','zoom'].forEach(k=>document.getElementById(k).value=s[k]);initialized=true;}
  }catch(e){statusEl.textContent='Status error: '+e.message;}
 }

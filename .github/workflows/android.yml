@@ -29,6 +29,8 @@ jobs:
           gradle-version: '8.10.2'
       - name: Build APK
         run: gradle :app:assembleDebug --stacktrace
+      - name: Test client lifecycle
+        run: gradle :app:testDebugUnitTest --stacktrace
       - name: Publish APK to release
         if: github.event_name != 'pull_request'
         working-directory: .
