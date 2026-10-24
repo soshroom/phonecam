@@ -1,6 +1,7 @@
 package dev.soshroom.phonecam
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -22,8 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class CameraService : Service() {
     private lateinit var manager: CameraManager
-    private lateinit var cameraThread: HandlerThread
-    private lateinit var cameraHandler: Handler
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var camera: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var encoder: MediaCodec? = null
@@ -33,7 +33,8 @@ class CameraService : Service() {
     private var controlServer: ControlServer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentConfig: CameraConfig? = null
-    private val draining = AtomicBoolean(false)
+    private var draining = AtomicBoolean(false)
+    private var cameraGeneration = 0
     private var repeatingBuilder: CaptureRequest.Builder? = null
     private var sensorRect: Rect? = null
     private var startedAt = 0L
@@ -50,8 +51,6 @@ class CameraService : Service() {
     override fun onCreate() {
         super.onCreate()
         manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cameraThread = HandlerThread("phonecam-camera").also { it.start() }
-        cameraHandler = Handler(cameraThread.looper)
         createNotificationChannel()
     }
 
@@ -69,23 +68,11 @@ class CameraService : Service() {
     private fun startEverything() {
         if (running) return
         val cfg = CameraConfig.load(this)
-        startForeground(
-            NOTIFICATION_ID,
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.presence_video_online)
-                .setContentTitle("PhoneCam")
-                .setContentText("Camera streaming on LAN")
-                .setOngoing(true)
-                .build()
-        )
-        wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneCam::stream").apply { acquire() }
+        startForeground(NOTIFICATION_ID, notification(false))
 
-        h264Server = H264Server(cfg.streamPort) {
-            runCatching {
-                encoder?.setParameters(Bundle().apply {
-                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                })
+        h264Server = H264Server(cfg.streamPort) { connected ->
+            mainHandler.post {
+                if (running) updateClients(connected)
             }
         }.also { it.start() }
         startedAt = SystemClock.elapsedRealtime()
@@ -98,12 +85,44 @@ class CameraService : Service() {
             encoderOutputBufferFps = { encoderOutputBufferFps },
             partialBuffers = { encoderPartialBuffers },
             fpsRange = { selectedFpsRange },
-            applySettings = { applyConfig(it) },
-            stopCamera = { stopEverything() },
+            streaming = { streaming },
+            applySettings = { mainHandler.post { if (running) applyConfig(it) } },
+            stopCamera = { mainHandler.post { if (running) stopEverything() } },
         ).also { it.start(5000, false) }
 
+        currentConfig = cfg
         running = true
-        restartCamera(cfg)
+        onStateChanged?.invoke()
+    }
+
+    private fun notification(active: Boolean): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.presence_video_online)
+        .setContentTitle("PhoneCam")
+        .setContentText(if (active) "Camera streaming on LAN" else "Waiting for client")
+        .setOngoing(true)
+        .build()
+
+    private fun updateClients(connected: Boolean) {
+        if ((h264Server?.clientCount() ?: 0) == 0) {
+            closeCameraPipeline()
+            wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
+            streaming = false
+        } else {
+            if (encoder == null) {
+                wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneCam::stream").apply { acquire() }
+                restartCamera(currentConfig ?: CameraConfig.load(this))
+            } else if (connected) {
+                runCatching {
+                    encoder?.setParameters(Bundle().apply {
+                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                    })
+                }
+            }
+            streaming = true
+        }
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(streaming))
+        onStateChanged?.invoke()
     }
 
     private fun applyConfig(next: CameraConfig) {
@@ -112,6 +131,10 @@ class CameraService : Service() {
             return
         }
         val old = currentConfig
+        if ((h264Server?.clientCount() ?: 0) == 0) {
+            currentConfig = next
+            return
+        }
         if (old == null || old.cameraId != next.cameraId || old.width != next.width || old.height != next.height || old.fps != next.fps) {
             restartCamera(next)
             return
@@ -130,6 +153,7 @@ class CameraService : Service() {
     private fun restartCamera(cfg: CameraConfig) {
         closeCameraPipeline()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
+        val generation = cameraGeneration
         val cameraId = chooseCamera(cfg.cameraId)
         currentConfig = cfg.copy(cameraId = cameraId).also { it.save(this) }
         h264Server?.setCodecConfig(emptyList())
@@ -140,12 +164,22 @@ class CameraService : Service() {
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
+                if (generation != cameraGeneration || !running || (h264Server?.clientCount() ?: 0) == 0) {
+                    device.close()
+                    return
+                }
                 camera = device
-                createSession(currentConfig!!)
+                createSession(currentConfig!!, generation)
             }
-            override fun onDisconnected(device: CameraDevice) { device.close(); camera = null }
-            override fun onError(device: CameraDevice, error: Int) { device.close(); camera = null }
-        }, cameraHandler)
+            override fun onDisconnected(device: CameraDevice) {
+                device.close()
+                if (camera === device) camera = null
+            }
+            override fun onError(device: CameraDevice, error: Int) {
+                device.close()
+                if (camera === device) camera = null
+            }
+        }, mainHandler)
     }
 
     private fun setupEncoder(cfg: CameraConfig) {
@@ -178,15 +212,21 @@ class CameraService : Service() {
             encoderSurface = codec.createInputSurface()
             codec.start()
         }
-        draining.set(true)
-        encoderThread = Thread({ drainEncoder() }, "phonecam-encoder").also { it.start() }
+        val codec = encoder!!
+        val active = AtomicBoolean(true)
+        draining = active
+        encoderThread = Thread({ drainEncoder(codec, active) }, "phonecam-encoder").also { it.start() }
     }
 
-    private fun createSession(cfg: CameraConfig) {
+    private fun createSession(cfg: CameraConfig, generation: Int) {
         val device = camera ?: return
         val videoSurface = encoderSurface ?: return
         device.createCaptureSession(listOf(videoSurface), object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(captureSession: CameraCaptureSession) {
+                if (generation != cameraGeneration || !running || (h264Server?.clientCount() ?: 0) == 0) {
+                    captureSession.close()
+                    return
+                }
                 session = captureSession
                 repeatingBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                     addTarget(videoSurface)
@@ -195,8 +235,8 @@ class CameraService : Service() {
                 }
                 rebuildRepeating(cfg)
             }
-            override fun onConfigureFailed(captureSession: CameraCaptureSession) = Unit
-        }, cameraHandler)
+            override fun onConfigureFailed(captureSession: CameraCaptureSession) { captureSession.close() }
+        }, mainHandler)
     }
 
     private fun chooseFpsRange(cameraId: String, requestedFps: Int): Range<Int> {
@@ -229,7 +269,7 @@ class CameraService : Service() {
             val top = active.centerY() - h / 2
             builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(left, top, left + w, top + h))
         }
-        runCatching { captureSession.setRepeatingRequest(builder.build(), null, cameraHandler) }
+        runCatching { captureSession.setRepeatingRequest(builder.build(), null, null) }
     }
 
     private fun updateCodecConfig(config: List<ByteArray>) {
@@ -271,7 +311,7 @@ class CameraService : Service() {
         h264Server?.broadcast(bytes)
     }
 
-    private fun drainEncoder() {
+    private fun drainEncoder(codec: MediaCodec, active: AtomicBoolean) {
         val info = MediaCodec.BufferInfo()
         val pending = ByteArrayOutputStream()
         var pendingPtsUs: Long? = null
@@ -286,8 +326,7 @@ class CameraService : Service() {
             pendingFlags = 0
         }
 
-        while (draining.get()) {
-            val codec = encoder ?: break
+        while (active.get()) {
             try {
                 when (val index = codec.dequeueOutputBuffer(info, 10_000)) {
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -341,7 +380,7 @@ class CameraService : Service() {
                 break
             }
         }
-        flushPending()
+        if (active.get()) flushPending()
     }
 
     private fun chooseCamera(requested: String): String {
@@ -352,6 +391,7 @@ class CameraService : Service() {
     }
 
     private fun closeCameraPipeline() {
+        ++cameraGeneration
         session?.close(); session = null
         camera?.close(); camera = null
         draining.set(false)
@@ -374,13 +414,14 @@ class CameraService : Service() {
         controlServer?.stop(); controlServer = null
         h264Server?.stop(); h264Server = null
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
+        streaming = false
+        onStateChanged?.invoke()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
         if (running) stopEverything()
-        cameraThread.quitSafely()
         super.onDestroy()
     }
 
@@ -396,6 +437,8 @@ class CameraService : Service() {
         const val ACTION_STOP = "dev.soshroom.phonecam.STOP"
         const val ACTION_APPLY = "dev.soshroom.phonecam.APPLY"
         @Volatile var running = false
+        @Volatile var streaming = false
+        var onStateChanged: (() -> Unit)? = null
         private const val CHANNEL_ID = "phonecam_stream"
         private const val NOTIFICATION_ID = 1
     }

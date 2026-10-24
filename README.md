@@ -61,7 +61,7 @@ Bitrate:    5 Mbps
 Zoom:       1.0x
 ```
 
-Press **Start camera**.
+Press **Start PhoneCam**. The app waits for a Windows stream client before opening the camera or encoder. It returns to waiting when the last client disconnects.
 
 The app shows the phone's LAN address and the two listening ports. By default:
 
@@ -70,7 +70,7 @@ Web control: http://PHONE_IP:8080
 Video:       PHONE_IP:8554
 ```
 
-The camera runs inside an Android foreground service and holds a partial wake lock, so streaming can continue while the PhoneCam activity is in the background or the screen is off.
+The Android foreground service keeps the TCP and web control ports available while waiting. Camera capture, encoding, and the partial wake lock run only while a stream client is connected. Streaming can continue while the PhoneCam activity is in the background or the screen is off; reconnecting during Android Doze may be delayed.
 
 ### 2. Optional browser control page
 
@@ -87,6 +87,7 @@ The page provides:
 - active camera AE FPS range
 - bitrate and zoom
 - connected Windows client count
+- waiting or streaming state
 - uptime
 - battery percentage and battery temperature
 - runtime settings
